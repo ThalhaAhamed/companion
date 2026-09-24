@@ -33,7 +33,6 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
-import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -259,11 +258,10 @@ class TunnelManager:
 async def _answers(base: Optional[str]) -> bool:
     if not base:
         return False
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            return (await client.get(f"{base}/health")).status_code < 400
-    except Exception:
-        return False
+    from app.services.public_probe import health_status
+
+    code = await health_status(base)
+    return code is not None and code < 400
 
 
 def _enabled() -> bool:

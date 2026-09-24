@@ -16,12 +16,10 @@ from dataclasses import asdict
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
-import httpx
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database.repositories import UserRepository
 from app.models.database import User
 from app.runtime_config import effective_mcp_server_url, load_config
@@ -161,17 +159,17 @@ _probe_cache: Dict[str, Any] = {"url": None, "at": 0.0, "problem": None}
 
 async def _health_problem(base: str) -> Optional[str]:
     """GET <base>/health from outside; why it failed, or None when this server answered."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{base}/health")
-        if resp.status_code >= 400:
-            return f"{base} answered {resp.status_code} instead of this server, so the agent's memory lookups will fail."
-        return None
-    except Exception:
+    from app.services.public_probe import health_status
+
+    code = await health_status(base)
+    if code is None:
         return (
             f"{base} is not answering from the internet (a tunnel that was closed or restarted gets a new address). "
             "The agent will not be able to look anything up until the address is live."
         )
+    if code >= 400:
+        return f"{base} answered {code} instead of this server, so the agent's memory lookups will fail."
+    return None
 
 
 async def memory_server_problem() -> Optional[str]:

@@ -8,6 +8,7 @@ all) while activation reported success, a Gemini agent thinking for 1024
 tokens before every reply with its own turn detection switched off, and an
 introduction posted into the Google Meet waiting room where nobody saw it.
 """
+import re
 import uuid
 
 import httpx
@@ -22,7 +23,9 @@ from tests.test_webhooks import _launch
 
 
 def _public(monkeypatch, url="https://mc.example.com/mcp"):
-    monkeypatch.setattr(agents.settings, "MCP_SERVER_URL", url)
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "MCP_SERVER_URL", url)
 
 
 # -- the prompt ---------------------------------------------------------------
@@ -121,6 +124,8 @@ async def test_the_memory_probe_goes_through_the_public_address(monkeypatch, htt
 async def test_a_closed_tunnel_is_reported(monkeypatch, httpx_mock):
     _public(monkeypatch, "https://gone-tunnel.trycloudflare.com/mcp")
     httpx_mock.add_exception(httpx.ConnectError("name does not resolve"), url="https://gone-tunnel.trycloudflare.com/health")
+    # Not a stale answer cached on this machine: public DNS has no such name either.
+    httpx_mock.add_response(url=re.compile(r"https://1\.1\.1\.1/dns-query.*"), json={"Status": 3})
     problem = await agents.memory_server_problem()
     assert "not answering from the internet" in problem
     assert "gone-tunnel.trycloudflare.com" in problem
