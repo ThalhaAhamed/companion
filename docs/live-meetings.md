@@ -5,11 +5,27 @@ Notes, search, Ask AI and transcript upload work entirely on your machine.
 things: webhook deliveries (`/api/webhooks/meetstream`) and the voice agent's
 tool calls (`/mcp`).
 
-This has nothing to do with which database you use — SQLite or your own
-Postgres only changes where data is stored. It is about where the *server*
-runs: on a host with a public address (a VPS, Railway, Fly, …) no tunnel is
-needed at all; on a laptop, some tunnel is unavoidable while a bot is in a
-call.
+This has nothing to do with which database you use — SQLite, Supabase or
+any other Postgres only changes where data is stored; MeetStream never
+talks to the database, it talks to the Meet Companion server. It is about
+where the *server* runs: on a host with a public address (a VPS, Railway,
+Fly, …) no tunnel is needed at all; on a laptop, some tunnel is unavoidable
+while a bot is in a call.
+
+**On a laptop, the easy way:** Settings → Meetings → Public address → *Start
+a tunnel automatically*. It is switched on for you when an owner saves a
+MeetStream API key (onboarding or Settings), unless an address is already
+set or you have switched it on or off yourself. Meet Companion runs a Cloudflare quick tunnel
+(`cloudflared` ships in the desktop installer, checksum-pinned) for as long
+as it is open, waits until the address answers, and uses it — nothing to
+install, run or paste. Only MeetStream's paths answer through it (`/mcp`,
+`/api/webhooks/…`, the chat relay and `/health`); sign-in, the UI and the
+API return 404 there, so your install is not put on the internet. The
+address changes whenever the tunnel restarts; bots always get the current
+one. Quick tunnels come with no uptime guarantee, so for a team server
+prefer a fixed address (below).
+
+**Or set an address yourself:**
 
 1. Expose the server on a public URL — a real domain behind HTTPS, or during
    development a tunnel such as `cloudflared tunnel --url http://localhost:8000`
@@ -20,8 +36,13 @@ call.
    another host, or use a named Cloudflare tunnel / ngrok. Quick-tunnel URLs
    also change on every launch; for anything beyond a one-off test use a
    fixed domain.
-2. Set `MCP_SERVER_URL` to `https://<that-host>/mcp` (in `.env` or the
-   environment) and restart. The webhook callback URL is derived from it.
+2. Enter that address in **Settings → Meetings → Public address**
+   (`https://<that-host>` is enough) and press **Save and check**: it is
+   probed through the address itself and says whether MeetStream can reach
+   this server. No restart; the next bot you launch uses it. The webhook
+   callback URL is derived from it. On a server you can set
+   `MCP_SERVER_URL=https://<that-host>/mcp` in the environment instead,
+   which takes precedence and locks the field.
 3. Add your MeetStream API key in **Settings → Meetings** and a webhook
    signing secret (the same value on both sides).
 4. Create or activate an agent in **Agent**; Meet Companion wires the MCP

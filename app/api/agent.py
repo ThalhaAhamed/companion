@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dataclasses import asdict
 
 from app.config import settings
-from app.runtime_config import AgentTemplateSettings, load_config, update_config
+from app.runtime_config import AgentTemplateSettings, effective_mcp_server_url, load_config, update_config
 from app.database.connection import get_db
 from app.database.repositories import OrganizationRepository, UserRepository, MeetingRepository
 from app.models.database import User
@@ -128,7 +128,7 @@ async def get_agent_credentials(user: User = Depends(get_current_user), org_id: 
             "configured": bool(mcp_token),
             "masked_value": _mask_secret(mcp_token),
         },
-        "mcp_server_url": settings.MCP_SERVER_URL,
+        "mcp_server_url": effective_mcp_server_url(),
     }
 
 
@@ -212,10 +212,19 @@ async def set_meetstream_api_key(body: ApiKeyRequest, user: User = Depends(get_c
     user_repo = UserRepository(db)
     await user_repo.update_settings(user.id, {"meetstream_api_key": key})
     await db.commit()
+
+    # A key means bots are coming, and a bot's agent can only look anything
+    # up if MeetStream can reach this server: start the automatic tunnel
+    # unless an address is already set or someone chose otherwise. The
+    # tunnel is this machine's, so only an owner's key decides it.
+    from app.services.tunnel import switch_on_for_meetstream
+
+    tunnel_started = bool(user.role == "owner" and switch_on_for_meetstream())
     return {
         "meetstream_api_key": {"configured": True, "masked_value": _mask_secret(key)},
         "connected": connected,
         "connection_error": connection_error,
+        "tunnel_started": tunnel_started,
     }
 
 
@@ -448,8 +457,8 @@ async def create_agent(body: AgentCreateRequest, user: User = Depends(get_curren
     """Create a brand new MIA agent, owned by you personally and pre-wired to
     your workspace's MCP token so it can recall your workspace's meeting
     memory immediately. Set activate=false to create without switching to it."""
-    if not settings.MCP_SERVER_URL:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MCP_SERVER_URL is not configured on this deployment")
+    if not effective_mcp_server_url():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Set this server's public address in Settings → Meetings first.")
 
     org_repo = OrganizationRepository(db)
     org = await org_repo.get_by_id(user.organization_id)
@@ -470,12 +479,15 @@ async def create_agent(body: AgentCreateRequest, user: User = Depends(get_curren
             voice=merged["voice"],
             temperature=merged["temperature"],
             mode=merged["mode"],
-            mcp_server_url=settings.MCP_SERVER_URL,
+            mcp_server_url=effective_mcp_server_url(),
             mcp_auth_token=org.mcp_token,
             response_modality=merged["response_modality"],
             tool_results_to_chat=merged["tool_results_to_chat"],
             api_key=own_key,
             extra_model=tuned_for_voice({"provider": merged["provider"]}, mode=merged["mode"], transcriber=None),
+            # MeetStream's create endpoint answers 500 when the chat function
+            # is on a quick tunnel; the wiring below adds it by update.
+            include_chat_function=".trycloudflare.com" not in effective_mcp_server_url(),
         )
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"MeetStream API error: {e}")
@@ -483,6 +495,7 @@ async def create_agent(body: AgentCreateRequest, user: User = Depends(get_curren
     new_id = (result.get("agent_config") or result).get("AgentConfigID")
     if new_id:
         await claim_agent(db, user.id, new_id)
+        await ensure_mcp_wired(new_id, org.mcp_token, api_key=own_key)
         if body.activate:
             user_repo = UserRepository(db)
             await user_repo.update_settings(user.id, {"active_agent_config_id": new_id})

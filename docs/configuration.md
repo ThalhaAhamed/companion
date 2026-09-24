@@ -18,7 +18,7 @@ Everything is configurable from **Settings** in the app. Precedence is:
 | `LLM_BASE_URL` | per provider | Proxies, gateways, self-hosted endpoints |
 | `MEETSTREAM_API_KEY` | — | Deployment-wide key; each member can also add their own in Settings |
 | `MEETSTREAM_WEBHOOK_SECRET` | — | Signature check for webhook deliveries (also settable in Settings) |
-| `MCP_SERVER_URL` | `http://localhost:8000/mcp` | Public URL MeetStream uses to reach this server |
+| `MCP_SERVER_URL` | `http://localhost:8000/mcp` | Public URL MeetStream uses to reach this server. Also settable in Settings → Meetings → Public address; the environment variable wins |
 | `APP_HOST` | `127.0.0.1` | Bind address; `0.0.0.0` to accept connections from other machines |
 | `CORS_ORIGINS` | `[]` | Extra origins allowed to call the API with a session cookie |
 | `SESSION_SECRET` | generated | Cookie signing key; generated into `data/session.key` on first run |

@@ -44,7 +44,14 @@ def _client_ip(request: Request) -> str:
     address in the header on every request and never be limited at all.
     """
     from app.config import settings
+    from app.services.tunnel import tunnel_client_ip
 
+    # Everything through the app's tunnel arrives from 127.0.0.1 - one shared
+    # bucket for the whole internet, the person at the keyboard included.
+    # Cloudflare sets the real address and cannot be made to lie about it.
+    tunnelled = tunnel_client_ip(request)
+    if tunnelled:
+        return tunnelled
     if settings.TRUST_PROXY:
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:

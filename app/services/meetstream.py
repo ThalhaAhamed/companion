@@ -329,6 +329,7 @@ class MeetStreamClient:
         tool_results_to_chat: bool = True,
         api_key: Optional[str] = None,
         extra_model: Optional[Dict[str, Any]] = None,
+        include_chat_function: bool = True,
     ) -> Dict[str, Any]:
         """
         Create a brand new MIA agent, pre-wired to our own MCP server the same way
@@ -356,7 +357,7 @@ class MeetStreamClient:
             mcp_servers.append(server_config)
 
         custom_functions = []
-        if mcp_server_url:
+        if mcp_server_url and include_chat_function:
             custom_functions.append(_share_in_chat_function(mcp_server_url, mcp_auth_token))
 
         payload = {

@@ -24,9 +24,16 @@ jobs:
           - os: windows-latest
             label: Windows
             target: --win
+          # One macOS job per chip. The server (PyInstaller) and cloudflared
+          # are native binaries built for the machine that builds them: a
+          # single Apple Silicon job used to put its arm64 server into the
+          # Intel .dmg too, which could not start on an Intel Mac.
           - os: macos-latest
-            label: macOS
-            target: --mac
+            label: macOS Apple Silicon
+            target: --mac --arm64
+          - os: macos-15-intel
+            label: macOS Intel
+            target: --mac --x64
           - os: ubuntu-latest
             label: Linux
             target: --linux
@@ -68,6 +75,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
           python scripts/fetch_embedding_model.py desktop/models
+          python scripts/fetch_cloudflared.py desktop/bin
           pyinstaller desktop/server.spec --noconfirm --distpath desktop/build --workpath desktop/work
 
       - name: Package desktop app

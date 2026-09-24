@@ -12,6 +12,7 @@ from app import permissions as perms
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
+from app.runtime_config import effective_mcp_server_url
 from app.database.connection import get_db
 from app.database.repositories import MeetingRepository, OrganizationRepository, TranscriptRepository
 from app.models.schemas import (
@@ -144,7 +145,7 @@ async def create_meeting(
             bot_resp = await meetstream_client.create_bot(
                 meeting_link=meeting.meeting_url,
                 agent_config_id=active_agent_config_id,
-                callback_url=f"{settings.MCP_SERVER_URL.replace('/mcp', '')}/api/webhooks/meetstream",
+                callback_url=f"{effective_mcp_server_url().replace('/mcp', '')}/api/webhooks/meetstream",
                 custom_attributes={
                     "organization_id": str(org_id),
                     "meeting_id": str(meeting.id),

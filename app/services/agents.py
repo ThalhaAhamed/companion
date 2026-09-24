@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.repositories import UserRepository
 from app.models.database import User
-from app.runtime_config import load_config
+from app.runtime_config import effective_mcp_server_url, load_config
 from app.services.meetstream import meetstream_client, _share_in_chat_function
 
 logger = logging.getLogger(__name__)
@@ -170,7 +170,7 @@ async def _health_problem(base: str) -> Optional[str]:
     except Exception:
         return (
             f"{base} is not answering from the internet (a tunnel that was closed or restarted gets a new address). "
-            "The agent will not be able to look anything up until the address is live and set as MCP_SERVER_URL."
+            "The agent will not be able to look anything up until the address is live."
         )
 
 
@@ -186,7 +186,7 @@ async def memory_server_problem() -> Optional[str]:
     with nothing on screen saying why. Probed through the public address
     itself (GET /health), cached briefly so pages that show it stay cheap.
     """
-    url = (settings.MCP_SERVER_URL or "").strip()
+    url = effective_mcp_server_url().strip()
     now = time.monotonic()
     if _probe_cache["url"] == url and now - _probe_cache["at"] < _PROBE_TTL_SECONDS:
         return _probe_cache["problem"]
@@ -195,7 +195,7 @@ async def memory_server_problem() -> Optional[str]:
     host = (parsed.hostname or "").lower()
     problem: Optional[str] = None
     if not url:
-        problem = "No public server address is set (MCP_SERVER_URL), so the agent has no way to reach meeting memory."
+        problem = "No public address is set, so the agent has no way to reach meeting memory."
     elif parsed.scheme != "https" or host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
         problem = (
             f"The agent is pointed at {url}, which MeetStream cannot reach - it needs a public https address. "
@@ -348,16 +348,17 @@ async def ensure_mcp_wired(agent_config_id: str, mcp_token: Optional[str], api_k
     mcp_servers = list(current_agent.get("mcp_servers") or [])
     custom_functions = list(current_agent.get("custom_functions") or [])
 
+    server_url = effective_mcp_server_url()
     mcp_ok = (
         bool(mcp_servers)
         and mcp_servers[0].get("active")
-        and mcp_servers[0].get("url") == settings.MCP_SERVER_URL
+        and mcp_servers[0].get("url") == server_url
         and (mcp_servers[0].get("headers") or {}).get("Authorization") == f"Bearer {mcp_token}"
     )
     # The function has to point at *this* server, not merely exist: after a
     # move (new tunnel, new host) an agent kept its old share_in_chat URL and
     # posted chat messages to a server that no longer answered.
-    wanted_fn = _share_in_chat_function(settings.MCP_SERVER_URL, mcp_token)
+    wanted_fn = _share_in_chat_function(server_url, mcp_token)
     chat_fn_ok = any(
         f.get("name") == "share_in_chat"
         and f.get("url") == wanted_fn["url"]
@@ -372,7 +373,7 @@ async def ensure_mcp_wired(agent_config_id: str, mcp_token: Optional[str], api_k
     default_tools = {"get_current_datetime", "search_meeting_memory", "get_meeting", "get_previous_meetings", "get_action_items"}
     current_agent["mcp_servers"] = [{
         "name": "Meet Companion MCP",
-        "url": settings.MCP_SERVER_URL,
+        "url": server_url,
         "timeout": MCP_TOOL_TIMEOUT_SECONDS,
         "active": True,
         "allowed_tools": sorted(existing_tools | default_tools),
@@ -399,7 +400,7 @@ async def ensure_mcp_wired(agent_config_id: str, mcp_token: Optional[str], api_k
         return {"memory": True, "chat": False, "problem": None}
     except Exception as exc:
         detail = _reason(exc)
-        logger.warning(f"Could not wire agent {agent_config_id} to {settings.MCP_SERVER_URL}: {detail}")
+        logger.warning(f"Could not wire agent {agent_config_id} to {server_url}: {detail}")
         return {"memory": False, "chat": False, "problem": f"MeetStream refused to connect the agent to this server: {detail}"}
 
 

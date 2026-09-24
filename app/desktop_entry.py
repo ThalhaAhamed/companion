@@ -40,6 +40,12 @@ def main() -> None:
     bundled_models = _bundle_root() / "models"
     if bundled_models.is_dir():
         os.environ.setdefault("MEET_COMPANION_BUNDLED_MODELS", str(bundled_models))
+    # The tunnel ships with the build (scripts/fetch_cloudflared.py).
+    for name in ("cloudflared.exe", "cloudflared"):
+        bundled_tunnel = _bundle_root() / "bin" / name
+        if bundled_tunnel.is_file():
+            os.environ.setdefault("MEET_COMPANION_CLOUDFLARED", str(bundled_tunnel))
+            break
     os.environ.setdefault("APP_ENV", "desktop")
     # No .env in a packaged install: one shipped by accident must not override
     # what the person configured in Settings.
@@ -50,6 +56,8 @@ def main() -> None:
     from app.main import app
 
     port = args.port or _free_port(args.host)
+    # The automatic tunnel forwards to this port (app.services.tunnel).
+    os.environ["MEET_COMPANION_PORT"] = str(port)
     # Printed before serving so the shell can read it from stdout.
     print(f"MEET_COMPANION_PORT={port}", flush=True)
     uvicorn.run(app, host=args.host, port=port, log_level="info")

@@ -6,6 +6,7 @@ accepted here but never returned: responses carry masked previews only.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 import logging
@@ -33,8 +34,10 @@ from app.runtime_config import (
     LLMSettings,
     MeetStreamSettings,
     describe_environment_managed,
+    effective_mcp_server_url,
     effective_meetstream_api_key,
     effective_webhook_secret,
+    normalise_public_url,
     is_env_managed,
     load_config,
     mask_secret,
@@ -132,6 +135,8 @@ class MeetStreamConfigPayload(BaseModel):
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     webhook_secret: Optional[str] = None
+    # This server's public https address; "" clears it.
+    public_url: Optional[str] = None
 
 
 class CompleteSetupPayload(BaseModel):
@@ -241,8 +246,51 @@ async def _full_status() -> Dict[str, Any]:
             "configured": bool(effective_meetstream_api_key()),
             "api_key": mask_secret(effective_meetstream_api_key()),
             "webhook_secret_configured": bool(effective_webhook_secret()),
+            # Where MeetStream reaches this server, and whether it can.
+            "public_url": effective_mcp_server_url(),
+            "public_url_problem": await _public_url_problem(),
+            "tunnel": _tunnel_status(),
         },
     }
+
+
+def _tunnel_status():
+    from app.services.tunnel import tunnel_manager
+
+    return tunnel_manager.describe()
+
+
+class TunnelRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/tunnel", dependencies=[Depends(require_setup_access)])
+async def get_tunnel() -> Dict[str, Any]:
+    """The automatic tunnel's state, for Settings to follow while it starts."""
+    return {**_tunnel_status(), "public_url": effective_mcp_server_url(), "public_url_problem": await _public_url_problem()}
+
+
+@router.put("/tunnel", dependencies=[Depends(require_setup_access)])
+async def set_tunnel(body: TunnelRequest) -> Dict[str, Any]:
+    """Switch the automatic tunnel on or off; it starts or stops within seconds."""
+    from app.runtime_config import env_override
+    from app.services.tunnel import tunnel_manager
+
+    if body.enabled and env_override("MCP_SERVER_URL"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="MCP_SERVER_URL is set in this machine's environment, which takes precedence over a tunnel.",
+        )
+    current = load_config()
+    update_config(meetstream=replace(current.meetstream, auto_tunnel=body.enabled, auto_tunnel_chosen=True))
+    tunnel_manager.poke()
+    return await get_tunnel()
+
+
+async def _public_url_problem():
+    from app.services.agents import memory_server_problem
+
+    return await memory_server_problem()
 
 
 @router.get("/providers")
@@ -372,7 +420,8 @@ def _environment_conflicts(payload: CompleteSetupPayload) -> list[str]:
                    ("llm.api_key", "LLM_API_KEY", payload.llm.api_key), ("llm.base_url", "LLM_BASE_URL", payload.llm.base_url)]
     if payload.meetstream is not None:
         wanted += [("meetstream.api_key", "MEETSTREAM_API_KEY", payload.meetstream.api_key),
-                   ("meetstream.webhook_secret", "MEETSTREAM_WEBHOOK_SECRET", payload.meetstream.webhook_secret)]
+                   ("meetstream.webhook_secret", "MEETSTREAM_WEBHOOK_SECRET", payload.meetstream.webhook_secret),
+                   ("meetstream.public_url", "MCP_SERVER_URL", payload.meetstream.public_url)]
     conflicts = []
     for field, env_name, value in wanted:
         if value is None:
@@ -512,6 +561,19 @@ async def complete_setup(payload: CompleteSetupPayload, request: Request, respon
                     )
 
     meetstream = current.meetstream
+    public_url = current.meetstream.public_url
+    if payload.meetstream is not None and payload.meetstream.public_url is not None:
+        if payload.meetstream.public_url.strip() == "":
+            public_url = None
+        else:
+            try:
+                public_url = normalise_public_url(payload.meetstream.public_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        # A new address must be probed afresh, not answered from the cache.
+        from app.services.agents import _probe_cache
+
+        _probe_cache.update(url=None, at=0.0, problem=None)
     if payload.meetstream is not None:
         meetstream = MeetStreamSettings(
             api_key=payload.meetstream.api_key
@@ -521,6 +583,7 @@ async def complete_setup(payload: CompleteSetupPayload, request: Request, respon
             webhook_secret=payload.meetstream.webhook_secret
             if payload.meetstream.webhook_secret is not None
             else current.meetstream.webhook_secret,
+            public_url=public_url,
         )
 
     update_config(

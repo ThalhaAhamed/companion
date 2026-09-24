@@ -7,8 +7,8 @@ once MeetStream has the transcript (a few minutes after the call). If it
 does not move at all, the server cannot reach MeetStream (network, or the
 API key was changed after launch); the server log says why. *Reprocess*
 fetches the transcript by id at any time. The agent answering *in* the call
-is the part that needs a public `MCP_SERVER_URL` (see
-[Live meetings](live-meetings.md)).
+is the part that needs a public address — **Settings → Meetings → Public
+address** (see [Live meetings](live-meetings.md)).
 
 **"Processed without AI (…)"** on a meeting. The AI provider failed and the
 rule-based parser ran instead; the message in brackets is the provider's own

@@ -73,3 +73,4 @@ frontend/dist/
 .cloudflared*.log
 .tmp/
 desktop/models/
+desktop/bin/

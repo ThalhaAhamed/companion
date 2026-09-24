@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useState } from 'react'
 import { Page, PageHeader } from '../components/AppShell'
 import { AskAiIcon, CheckIcon, PlusIcon, RobotIcon, TrashIcon } from '../components/Icons'
@@ -801,6 +802,8 @@ export default function Agent() {
                 <div className="mb-4">
                   <Notice title="This agent can't look anything up in a call yet">
                     {wiringNotice || config.MemoryProblem}
+                    <br />
+                    <Link to="/settings?section=meetings" className="mt-1 inline-block font-semibold underline">Set the public address in Settings → Meetings</Link>
                   </Notice>
                 </div>
               )}

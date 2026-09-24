@@ -71,6 +71,15 @@ class MeetStreamSettings:
     base_url: Optional[str] = None
     # Shared secret MeetStream signs webhook deliveries with.
     webhook_secret: Optional[str] = None
+    # This server's public https address, as MeetStream reaches it: where
+    # the in-call agent's memory tools (…/mcp) and webhooks are sent. Saved
+    # from Settings; MCP_SERVER_URL in the environment still wins.
+    public_url: Optional[str] = None
+    # Run a Cloudflare quick tunnel and use its address (app.services.tunnel).
+    auto_tunnel: bool = False
+    # Someone switched the tunnel on or off themselves: saving a MeetStream
+    # key no longer decides it for them.
+    auto_tunnel_chosen: bool = False
 
 
 @dataclass
@@ -247,6 +256,7 @@ def describe_environment_managed() -> Dict[str, bool]:
         "database.url": is_env_managed("DATABASE_URL"),
         "meetstream.api_key": is_env_managed("MEETSTREAM_API_KEY"),
         "meetstream.webhook_secret": is_env_managed("MEETSTREAM_WEBHOOK_SECRET"),
+        "meetstream.public_url": is_env_managed("MCP_SERVER_URL"),
     }
 
 
@@ -277,3 +287,51 @@ def effective_meetstream_base_url() -> str:
 
 def effective_webhook_secret() -> Optional[str]:
     return resolve("MEETSTREAM_WEBHOOK_SECRET", load_config().meetstream.webhook_secret, settings.MEETSTREAM_WEBHOOK_SECRET)
+
+
+#: The automatic tunnel's MCP endpoint while it is up (app.services.tunnel).
+_tunnel_url: Optional[str] = None
+
+
+def set_tunnel_url(url: Optional[str]) -> None:
+    global _tunnel_url
+    _tunnel_url = url
+
+
+def effective_mcp_server_url() -> str:
+    """
+    The MCP endpoint MeetStream calls: the environment, then the automatic
+    tunnel while it is running, then the public address saved in Settings,
+    then .env / the built-in localhost default. The desktop app had no way to
+    set this at all, so every desktop agent was pointed at
+    http://localhost:8000/mcp - which MeetStream cannot reach.
+    """
+    override = env_override("MCP_SERVER_URL")
+    if override:
+        return override
+    if _tunnel_url and load_config().meetstream.auto_tunnel:
+        return _tunnel_url
+    return resolve("MCP_SERVER_URL", load_config().meetstream.public_url, settings.MCP_SERVER_URL) or ""
+
+
+def normalise_public_url(raw: str) -> str:
+    """
+    "x.trycloudflare.com", "https://x.com/", "https://x.com/mcp" all mean the
+    same server; store the MCP endpoint. Raises ValueError when it cannot be
+    a public https address.
+    """
+    from urllib.parse import urlparse
+
+    value = (raw or "").strip()
+    if value and "://" not in value:
+        value = "https://" + value
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host:
+        raise ValueError("Enter a public https address, like https://meet.example.com or your tunnel's https://….trycloudflare.com.")
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith(".local"):
+        raise ValueError("That address only exists on this computer; MeetStream needs one it can reach from the internet (a tunnel or a real domain).")
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/mcp"):
+        path = f"{path}/mcp"
+    return "https://" + parsed.netloc + path

@@ -31,6 +31,15 @@ MODELS = ROOT / "desktop" / "models"
 if MODELS.is_dir() and any(MODELS.iterdir()):
     datas.append((str(MODELS), "models"))
 
+# cloudflared, for the automatic tunnel, fetched and checksum-verified by
+# scripts/fetch_cloudflared.py. A binary, not data, so it keeps its
+# executable bit on macOS and Linux. Optional: without it the Settings
+# switch says the tunnel is unavailable.
+TUNNEL_BIN = ROOT / "desktop" / "bin"
+for name in ("cloudflared.exe", "cloudflared"):
+    if (TUNNEL_BIN / name).is_file():
+        binaries.append((str(TUNNEL_BIN / name), "bin"))
+
 # fastembed/onnxruntime/tokenizers ship native libraries and data files that
 # static analysis does not find on its own.
 for package in ("fastembed", "onnxruntime", "tokenizers"):

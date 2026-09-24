@@ -60,7 +60,12 @@ async def lifespan(app: FastAPI):
     from app.services.bot_watch import bot_watcher
 
     bot_watcher.start()
+    # Starts cloudflared if "Start a tunnel automatically" is on; idle otherwise.
+    from app.services.tunnel import tunnel_manager
+
+    tunnel_manager.start()
     yield
+    await tunnel_manager.stop()
     await bot_watcher.stop()
     logger.info("%s shutting down", settings.APP_NAME)
 
@@ -88,6 +93,11 @@ app = FastAPI(
 app.add_middleware(AuthGateMiddleware)
 # Body-size cap and credential-endpoint rate limit (see app/middleware/limits.py).
 app.add_middleware(RequestLimitsMiddleware, max_body_bytes=settings.MAX_REQUEST_BYTES)
+# Outside the two above: through the automatic tunnel only MeetStream's
+# paths answer, so sign-in and the UI never reach the internet.
+from app.middleware.tunnel_guard import TunnelGuardMiddleware  # noqa: E402
+
+app.add_middleware(TunnelGuardMiddleware)
 
 # CORS Middleware
 app.add_middleware(

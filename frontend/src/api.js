@@ -357,6 +357,15 @@ export function testDatabase(payload) {
   })
 }
 
+/** The automatic tunnel: state, address, and whether MeetStream can reach it. */
+export function getTunnel() {
+  return req('/setup/tunnel')
+}
+
+export function setTunnel(enabled) {
+  return req('/setup/tunnel', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) })
+}
+
 export function completeSetup(payload) {
   return req('/setup/complete', {
     method: 'POST',

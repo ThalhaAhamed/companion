@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Page, PageHeader } from '../components/AppShell'
 import { MeetingsIcon, PencilIcon, PlusIcon, SearchIcon } from '../components/Icons'
 import { Badge, Card, EmptyState, ErrorMessage, ExportMenu, Field, Loading, Modal, Notice, Spinner } from '../components/ui'
@@ -106,6 +106,8 @@ function LaunchBotModal({ open, onClose, onLaunched }) {
           <div className="mb-4">
             <Notice title={`${agent.AgentName || 'The agent'} won't be able to look anything up in this call`}>
               {agent.MemoryProblem} The bot still joins, records and is summarised afterwards.
+              <br />
+              <Link to="/settings?section=meetings" className="mt-1 inline-block font-semibold underline">Set the public address in Settings → Meetings</Link>
             </Notice>
           </div>
         )}
