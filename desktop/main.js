@@ -10,6 +10,7 @@ const { spawn } = require('node:child_process')
 const http = require('node:http')
 const path = require('node:path')
 const fs = require('node:fs')
+const { createServerLog } = require('./server-log')
 
 let serverProcess = null
 let serverPort = null
@@ -62,8 +63,11 @@ function startServer() {
   const dir = dataDir()
   fs.mkdirSync(dir, { recursive: true })
 
-  const logPath = path.join(app.getPath('userData'), 'server.log')
-  const log = fs.createWriteStream(logPath, { flags: 'a' })
+  // Falls back to the data directory if the usual file cannot be written.
+  const log = createServerLog(path.join(app.getPath('userData'), 'server.log'), path.join(dir, 'server.log'))
+  log.write(`
+[meet-companion] starting ${app.getVersion()} at ${new Date().toISOString()}
+`)
 
   return new Promise((resolve, reject) => {
     serverProcess = spawn(executable, ['--data-dir', dir], {
@@ -87,8 +91,9 @@ function startServer() {
     serverProcess.stderr.on('data', onData)
     serverProcess.on('error', reject)
     serverProcess.on('exit', (code) => {
-      log.end()
-      if (port === null) reject(new Error(`The server exited early with code ${code}. See ${logPath}.`))
+      log.write(`[meet-companion] server exited with code ${code}
+`)
+      if (port === null) reject(new Error(`The server exited early with code ${code}. See ${log.path}.`))
     })
   })
 }

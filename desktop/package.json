@@ -26,7 +26,7 @@
       "output": "release",
       "buildResources": "build-resources"
     },
-    "files": ["main.js", "preload.js", "package.json"],
+    "files": ["main.js", "preload.js", "server-log.js", "package.json"],
     "extraResources": [
       {
         "from": "build/meet-companion-server",

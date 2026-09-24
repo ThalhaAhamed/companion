@@ -10,10 +10,11 @@ HTTPException where the router used to, so the router stays thin.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 
@@ -422,3 +423,55 @@ def get_agent_template() -> Dict[str, Any]:
 def render_template_text(text: str, agent_name: str) -> str:
     """Fill ``{agent_name}`` without str.format, so braces elsewhere are safe."""
     return (text or "").replace("{agent_name}", agent_name or "the assistant")
+
+
+# Where a prompt says who the agent is and what it answers to - the two
+# places DEFAULT_SYSTEM_PROMPT names it. Only these are read, so a prompt
+# that mentions other people ("You are talking to Priya") is left alone.
+_PROMPT_NAME_PATTERNS = (
+    re.compile(r"\bYou are ([A-Z][\w'-]*(?: [A-Z][\w'-]*){0,3}),"),
+    re.compile(r"addresses you by name \(\s*[\"“]([^\"”]{1,40})[\"”]\s*\)"),
+)
+
+
+def prompt_name_problem(agent_name: str, system_prompt: str) -> Optional[Dict[str, Any]]:
+    """
+    The names a prompt gives the agent that are not its own, with the prompt
+    corrected - or None.
+
+    An agent called "Gemini Agent" whose prompt said "You are Area" and
+    "only respond when a speaker addresses you by name ("Ares")" sat silent
+    through every call: people said the name its introduction gave them, and
+    its own rules told it that was not its name.
+    """
+    name = (agent_name or "").strip()
+    prompt = system_prompt or ""
+    if not name or not prompt:
+        return None
+    wrong: List[str] = []
+    for pattern in _PROMPT_NAME_PATTERNS:
+        for match in pattern.finditer(prompt):
+            found = match.group(1).strip()
+            if found.casefold() != name.casefold() and found not in wrong:
+                wrong.append(found)
+    if not wrong:
+        return None
+
+    def fix(match: "re.Match[str]") -> str:
+        start, end = match.span(1)
+        whole = match.group(0)
+        offset = match.start()
+        return whole[: start - offset] + name + whole[end - offset:]
+
+    fixed = prompt
+    for pattern in _PROMPT_NAME_PATTERNS:
+        fixed = pattern.sub(lambda m: fix(m) if m.group(1).strip().casefold() != name.casefold() else m.group(0), fixed)
+    quoted = " and ".join(f'"{n}"' for n in wrong)
+    return {
+        "names": wrong,
+        "message": (
+            f"The prompt calls this agent {quoted}, but it is named \"{name}\" and introduces itself that way - "
+            f"so when people say \"{name}\", its own instructions tell it to stay silent."
+        ),
+        "fixed_prompt": fixed,
+    }

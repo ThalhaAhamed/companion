@@ -6,6 +6,7 @@ Exposes Streamable HTTP endpoint at /mcp handling JSON-RPC 2.0 requests:
 - tools/call
 Also provides REST compatibility endpoints.
 """
+import time
 import logging
 import uuid
 import json
@@ -82,8 +83,12 @@ async def handle_mcp_jsonrpc(
         # access log shows anonymous "POST /mcp 200" lines for every
         # initialize/tools-list round-trip as well.
         logger.info(f"mcp tools/call org={org_id} tool={tool_name} args={arguments}")
+        started = time.monotonic()
         try:
             tool_output = await execute_tool(org_id, tool_name, arguments)
+            # How long the agent in the call waited - the part of a slow
+            # spoken answer that is this server's.
+            logger.info(f"mcp tools/call done tool={tool_name} in {time.monotonic() - started:.2f}s error={'error' in tool_output}")
             return {
                 "jsonrpc": "2.0",
                 "id": jsonrpc_id,
@@ -100,7 +105,7 @@ async def handle_mcp_jsonrpc(
         except Exception as e:
             # The caller is a voice agent: it needs a sentence to say, not
             # a Python message. The details go to the log.
-            logger.exception(f"mcp tools/call failed org={org_id} tool={tool_name}")
+            logger.exception(f"mcp tools/call failed org={org_id} tool={tool_name} after {time.monotonic() - started:.2f}s")
             return {
                 "jsonrpc": "2.0",
                 "id": jsonrpc_id,

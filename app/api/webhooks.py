@@ -245,6 +245,25 @@ async def process_webhook_event_async(
                         transcript_id=transcript_id,
                     )
 
+            elif event_type == "agent_error":
+                # The in-call agent itself failed - "keepalive ping timeout",
+                # recoverable false - while the bot stays in the call. It used
+                # to be stored and forgotten, so a meeting whose agent went
+                # silent 100 seconds in looked like one where nobody asked it
+                # anything. Kept on the meeting for the meeting page to show.
+                if meeting:
+                    attrs = dict(meeting.custom_attributes or {})
+                    errors = list(attrs.get("agent_errors") or [])
+                    errors.append({
+                        "message": payload.get("message") or "The agent reported an error",
+                        "recoverable": payload.get("recoverable"),
+                        "seconds_in": payload.get("relative_timestamp"),
+                        "at": payload.get("timestamp"),
+                    })
+                    attrs["agent_errors"] = errors[-10:]
+                    meeting.custom_attributes = attrs
+                    logger.warning(f"Agent error in meeting {meeting.id}: {payload.get('message')} (recoverable={payload.get('recoverable')})")
+
             elif event_type == "transcription.failed":
                 if meeting:
                     await meeting_repo.update_status(

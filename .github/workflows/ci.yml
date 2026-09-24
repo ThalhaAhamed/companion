@@ -65,6 +65,17 @@ jobs:
           npm test
           npm run build
 
+  desktop:
+    name: Desktop shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Node's built-in runner: the shell's own modules, no Electron needed.
+      - run: node --test desktop/tests/*.test.js
+
   docker:
     name: Docker image
     runs-on: ubuntu-latest

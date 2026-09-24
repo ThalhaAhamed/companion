@@ -35,6 +35,7 @@ from app.services.agents import (  # noqa: F401 - re-exported for existing impor
     get_all_claimed_agent_ids,
     get_meetstream_api_key,
     get_owned_agent_ids,
+    prompt_name_problem,
     render_template_text,
     require_claimable_agent,
     memory_server_problem,
@@ -270,6 +271,13 @@ async def get_current_agent(
         out["MemoryProblem"] = problem
         if isinstance(out.get("agent_config"), dict):
             out["agent_config"]["MemoryProblem"] = problem
+        # A prompt that calls the agent something else keeps it silent when
+        # people use the name it introduced itself with.
+        inner = out.get("agent_config") if isinstance(out.get("agent_config"), dict) else out
+        name_problem = prompt_name_problem(inner.get("AgentName") or "", (inner.get("Model") or {}).get("system_prompt") or "")
+        out["NameProblem"] = name_problem
+        if inner is not out:
+            inner["NameProblem"] = name_problem
         return out
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404 and agent_config_id == await get_active_agent_config_id(db, user.id):

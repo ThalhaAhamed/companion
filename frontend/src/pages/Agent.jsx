@@ -573,6 +573,21 @@ export default function Agent() {
     }
   }
 
+  // The prompt called the agent by another name, so it stayed silent when
+  // people used the one it introduces itself with. Saves the corrected prompt
+  // the server worked out; nothing else changes.
+  async function fixName() {
+    setSaving(true)
+    try {
+      await updateAgent({ agent_config_id: viewingId || undefined, system_prompt: config.NameProblem.fixed_prompt })
+      await loadConfig(viewingId || undefined)
+    } catch (err) {
+      setConfigError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   async function activate(agentConfigId) {
     setActivatingId(agentConfigId)
     setWiringNotice(null)
@@ -804,6 +819,22 @@ export default function Agent() {
                     {wiringNotice || config.MemoryProblem}
                     <br />
                     <Link to="/settings?section=meetings" className="mt-1 inline-block font-semibold underline">Set the public address in Settings → Meetings</Link>
+                  </Notice>
+                </div>
+              )}
+
+              {config.NameProblem && (
+                <div className="mb-4">
+                  <Notice title={`This agent won't answer to "${config.AgentName}"`}>
+                    {config.NameProblem.message}
+                    {canManage && (
+                      <>
+                        <br />
+                        <button type="button" className="mt-1 font-semibold underline" disabled={saving} onClick={fixName}>
+                          {saving ? 'Fixing…' : `Change the prompt to say "${config.AgentName}"`}
+                        </button>
+                      </>
+                    )}
                   </Notice>
                 </div>
               )}

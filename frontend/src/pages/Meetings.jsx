@@ -342,6 +342,12 @@ function UploadTranscriptModal({ open, onClose, onUploaded }) {
   )
 }
 
+/** "1:41" from seconds since the bot joined, as MeetStream reports agent errors. */
+function formatOffset(seconds) {
+  const whole = Math.max(0, Math.round(seconds))
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
+}
+
 function MeetingDetail({ meetingId, onChanged, onDeleted }) {
   const canEdit = useCan('edit_content')
   const [editingItem, setEditingItem] = useState(null)
@@ -441,6 +447,7 @@ function MeetingDetail({ meetingId, onChanged, onDeleted }) {
 
   const memories = meeting.memories || []
   const actionItems = meeting.action_items || []
+  const agentErrors = meeting.custom_attributes?.agent_errors || []
   const isLive = isLiveMeeting(meeting)
 
   const tabs = [
@@ -505,6 +512,23 @@ function MeetingDetail({ meetingId, onChanged, onDeleted }) {
         {meeting.processing_error && (
           <div className="mt-3">
             <ErrorMessage title="Processing problem" detail={meeting.processing_error} />
+          </div>
+        )}
+
+        {agentErrors.length > 0 && (
+          <div className="mt-3">
+            <Notice title="The agent stopped working during this call">
+              {agentErrors.map((error, index) => (
+                <span key={index} className="block">
+                  {typeof error.seconds_in === 'number' ? `${formatOffset(error.seconds_in)} in: ` : ''}
+                  {error.message}
+                  {error.recoverable === false ? ' — it could not recover, so it was silent for the rest of the call.' : ''}
+                </span>
+              ))}
+              <span className="mt-1 block text-xs">
+                This comes from MeetStream's side of the call, not from this app or its tunnel. The bot kept recording.
+              </span>
+            </Notice>
           </div>
         )}
       </div>
