@@ -102,7 +102,7 @@ async def test_activate_repoints_stale_share_in_chat_url(monkeypatch):
         "agent_config": {
             "Agent": {
                 "mcp_servers": [{
-                    "url": "https://new-host.example.com/mcp", "active": True,
+                    "url": "https://new-host.example.com/mcp", "active": True, "timeout": 10,
                     "headers": {"Authorization": "Bearer tok"}, "allowed_tools": ["get_meeting"],
                 }],
                 "custom_functions": [{

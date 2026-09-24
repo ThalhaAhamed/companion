@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Page, PageHeader } from '../components/AppShell'
 import { MeetingsIcon, PencilIcon, PlusIcon, SearchIcon } from '../components/Icons'
-import { Badge, Card, EmptyState, ErrorMessage, ExportMenu, Field, Loading, Modal, Spinner } from '../components/ui'
+import { Badge, Card, EmptyState, ErrorMessage, ExportMenu, Field, Loading, Modal, Notice, Spinner } from '../components/ui'
 import {
   createMeeting,
   deleteMeeting,
@@ -100,6 +100,14 @@ function LaunchBotModal({ open, onClose, onLaunched }) {
             <strong style={{ color: 'var(--text-strong)' }}>{agent.AgentName}</strong> joins and{' '}
             {MODE_BLURB[agent.InteractionMode] || MODE_BLURB.voice} Change this on the Agent page.
           </p>
+        )}
+
+        {agent?.MemoryProblem && (
+          <div className="mb-4">
+            <Notice title={`${agent.AgentName || 'The agent'} won't be able to look anything up in this call`}>
+              {agent.MemoryProblem} The bot still joins, records and is summarised afterwards.
+            </Notice>
+          </div>
         )}
 
         {error && <div className="mb-4"><ErrorMessage title="Could not deploy the bot" detail={error} /></div>}

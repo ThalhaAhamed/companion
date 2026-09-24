@@ -26,8 +26,12 @@ call.
    signing secret (the same value on both sides).
 4. Create or activate an agent in **Agent**; Meet Companion wires the MCP
    server URL, the `share_in_chat` chat relay and your workspace's token
-   into it. **Re-activate the agent whenever the URL changes** — that is
-   what re-points its wiring at the new host.
+   into it, and re-checks that wiring every time you launch a bot, so a
+   tunnel that came back on a new address is picked up without doing
+   anything. If the agent *cannot* reach this server — no public https
+   address, or a tunnel that has closed — the Agent page and the launch
+   dialog say so before the call, instead of the agent quietly answering
+   every memory question with a guess.
 
 Without a reachable URL a bot still joins and records, and the meeting still
 follows it: the server asks MeetStream for the bot's state every 20 seconds
@@ -38,6 +42,22 @@ faster path, not the only one. What a tunnel-less install does lose is the
 agent: it cannot reach memory during the call. A call in which nobody speaks
 produces no transcript on MeetStream's side; the meeting is marked failed
 with that reason.
+
+## Getting quick, accurate answers
+
+Activating an agent (**Use this agent**) also tunes it for a live call.
+For Gemini's native-audio model it turns off the "thinking" pass that ran
+before every spoken reply, and turns Gemini's own end-of-speech detection
+back on when it had been switched off without the external transcriber
+MeetStream requires for that — without either, the agent was slow to
+notice you had finished talking. Memory lookups time out after 10 seconds,
+MeetStream's default. Other model choices (voice, temperature, provider)
+stay as you set them.
+
+The introduction message is posted into the meeting chat by Meet Companion
+**once the bot has been admitted**, not when it first joins: on Google Meet
+a bot joins into the waiting room, where it cannot reach the chat, and a
+message sent then was lost.
 
 ## Answering by voice or in the chat
 

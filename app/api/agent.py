@@ -37,6 +37,9 @@ from app.services.agents import (  # noqa: F401 - re-exported for existing impor
     get_owned_agent_ids,
     render_template_text,
     require_claimable_agent,
+    memory_server_problem,
+    repair_agent_model,
+    tuned_for_voice,
     INTERACTION_MODES,
     MODALITY_FOR_MODE,
     interaction_mode_of,
@@ -252,6 +255,12 @@ async def get_current_agent(
         out["InteractionMode"] = mode
         if isinstance(out.get("agent_config"), dict):
             out["agent_config"]["InteractionMode"] = mode
+        # Shown on the Agent page and in the launch dialog: a call whose agent
+        # cannot reach memory answers every question by guessing.
+        problem = await memory_server_problem()
+        out["MemoryProblem"] = problem
+        if isinstance(out.get("agent_config"), dict):
+            out["agent_config"]["MemoryProblem"] = problem
         return out
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404 and agent_config_id == await get_active_agent_config_id(db, user.id):
@@ -466,6 +475,7 @@ async def create_agent(body: AgentCreateRequest, user: User = Depends(get_curren
             response_modality=merged["response_modality"],
             tool_results_to_chat=merged["tool_results_to_chat"],
             api_key=own_key,
+            extra_model=tuned_for_voice({"provider": merged["provider"]}, mode=merged["mode"], transcriber=None),
         )
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"MeetStream API error: {e}")
@@ -497,8 +507,10 @@ async def activate_agent(body: ActivateRequest, user: User = Depends(get_current
 
     org_repo = OrganizationRepository(db)
     org = await org_repo.get_by_id(user.organization_id)
-    await ensure_mcp_wired(body.agent_config_id, org.mcp_token if org else None, api_key=await require_meetstream_api_key(db, user.id))
-    return {"active_agent_config_id": body.agent_config_id}
+    own_key = await require_meetstream_api_key(db, user.id)
+    wiring = await ensure_mcp_wired(body.agent_config_id, org.mcp_token if org else None, api_key=own_key)
+    repaired = await repair_agent_model(body.agent_config_id, api_key=own_key, voice=True)
+    return {"active_agent_config_id": body.agent_config_id, "wiring": wiring, "repaired": repaired}
 
 
 @router.delete("", dependencies=[Depends(perms.require("manage_agents"))])
@@ -579,10 +591,14 @@ async def update_current_agent(body: AgentUpdateRequest, user: User = Depends(ge
     current_model: Dict[str, Any] = dict(current_cfg.get("Model") or {})
     current_agent: Dict[str, Any] = dict(current_cfg.get("Agent") or {})
 
+    # The form edits the template text, placeholders included; an agent whose
+    # prompt read "You are {agent_name} ... only respond when addressed as
+    # {agent_name}" could never be addressed by its name.
+    agent_name = current_cfg.get("AgentName") or ""
     if body.system_prompt is not None:
-        current_model["system_prompt"] = body.system_prompt
+        current_model["system_prompt"] = render_template_text(body.system_prompt, agent_name)
     if body.first_message is not None:
-        current_model["first_message"] = body.first_message
+        current_model["first_message"] = render_template_text(body.first_message, agent_name)
     if body.voice is not None:
         current_model["voice"] = body.voice
     if body.provider is not None:

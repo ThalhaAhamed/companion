@@ -48,6 +48,26 @@ def isolated_config(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def offline_health_probe(request, monkeypatch):
+    """
+    The memory-server probe makes a real request to MCP_SERVER_URL/health.
+    Tests stay offline: it answers "reachable" unless a test is marked
+    real_health_probe (and then mocks the HTTP layer itself). The cache is
+    cleared either way, so one test's answer never leaks into the next.
+    """
+    from app.services import agents
+
+    agents._probe_cache.update(url=None, at=0.0, problem=None)
+    if not request.node.get_closest_marker("real_health_probe"):
+        async def reachable(base):
+            return None
+
+        monkeypatch.setattr(agents, "_health_problem", reachable)
+    yield
+    agents._probe_cache.update(url=None, at=0.0, problem=None)
+
+
+@pytest.fixture(autouse=True)
 def unshadow_meetstream_client():
     """
     Undo the damage a monkeypatch on the shared MeetStream client leaves.

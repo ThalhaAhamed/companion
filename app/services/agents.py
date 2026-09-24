@@ -10,9 +10,13 @@ HTTPException where the router used to, so the router stays thin.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import asdict
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
+
+import httpx
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,13 +72,139 @@ TEMPLATE_DEFAULTS: Dict[str, Any] = {
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "first_message": DEFAULT_FIRST_MESSAGE,
     "provider": "openai",
-    "model": "gpt-4.1-mini",
+    # A realtime agent needs a realtime model. gpt-4.1-mini, the old default,
+    # is a text model - MeetStream's realtime models are gpt-realtime-mini
+    # (its default), gpt-realtime-1.5 and the gpt-4o realtime previews.
+    "model": "gpt-realtime-mini",
     "voice": "alloy",
-    "temperature": 0.8,
+    # Lower than the platform's 0.8: this agent answers from stored meeting
+    # data and is told never to invent any; it is not a creative voice.
+    "temperature": 0.6,
     "mode": "realtime",
-    "response_modality": "text",
+    # MeetStream's values are audio | chat | action. "text", the old default,
+    # is none of them.
+    "response_modality": "audio",
     "tool_results_to_chat": False,
 }
+
+#: Seconds MeetStream waits for one memory lookup. Its own default; a voice
+#: agent that waits longer has already lost the room, and on a dead tunnel
+#: every question used to cost the full 30 this was set to.
+MCP_TOOL_TIMEOUT_SECONDS = 10
+
+
+def tuned_for_voice(model_block: Dict[str, Any], *, mode: Optional[str], transcriber: Any) -> Dict[str, Any]:
+    """
+    A realtime agent's model settings with the two that make it slow in a
+    call corrected; everything else is left as its owner set it.
+
+    Gemini's native-audio model ran with thinking_budget 1024 - "extended
+    reasoning" before every spoken reply - and often with
+    disable_automatic_activity_detection on, which MeetStream documents as
+    requiring an external transcriber. Without one configured, nothing
+    detects that the speaker has finished, so the agent is late to answer.
+    """
+    tuned = dict(model_block or {})
+    if str(mode or "").lower() != "realtime" or str(tuned.get("provider") or "").lower() != "google":
+        return tuned
+    thinking = dict(tuned.get("thinking_config") or {})
+    if thinking.get("thinking_budget") != 0:
+        thinking["thinking_budget"] = 0
+        thinking.setdefault("include_thoughts", False)
+        tuned["thinking_config"] = thinking
+    if tuned.get("disable_automatic_activity_detection") and not transcriber:
+        tuned["disable_automatic_activity_detection"] = False
+    return tuned
+
+
+async def repair_agent_model(agent_config_id: str, api_key: Optional[str] = None, *, voice: bool = True) -> bool:
+    """
+    Fix an existing agent's model settings on MeetStream; True when it
+    changed anything.
+
+    Always: fill in a literal "{agent_name}" left in its prompt or first
+    message. The edit form used to save the template text unfilled, so an
+    agent could be running with "only respond when addressed as
+    {agent_name}" - a name nobody says. Safe to do on every launch.
+
+    With voice=True (on activation, a deliberate choice of this agent):
+    also apply tuned_for_voice. Not on every launch, so a setting someone
+    later changes on MeetStream's dashboard is not silently undone.
+    """
+    try:
+        current = await meetstream_client.get_mia_agent(agent_config_id, api_key=api_key)
+    except Exception:
+        return False
+    cfg = current.get("agent_config", current)
+    model = dict(cfg.get("Model") or {})
+    tuned = dict(model)
+    name = cfg.get("AgentName") or ""
+    for key in ("system_prompt", "first_message"):
+        if "{agent_name}" in str(tuned.get(key) or ""):
+            tuned[key] = render_template_text(tuned[key], name)
+    if voice:
+        tuned = tuned_for_voice(tuned, mode=cfg.get("Mode"), transcriber=cfg.get("Transcriber"))
+    if tuned == model:
+        return False
+    try:
+        # The Model block is replaced wholesale, so the whole merged block goes.
+        await meetstream_client.update_mia_agent_settings(agent_config_id=agent_config_id, model=tuned, api_key=api_key)
+        return True
+    except Exception as exc:
+        logger.warning(f"Could not update agent {agent_config_id}'s model settings: {exc}")
+        return False
+
+
+_PROBE_TTL_SECONDS = 30
+_probe_cache: Dict[str, Any] = {"url": None, "at": 0.0, "problem": None}
+
+
+async def _health_problem(base: str) -> Optional[str]:
+    """GET <base>/health from outside; why it failed, or None when this server answered."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{base}/health")
+        if resp.status_code >= 400:
+            return f"{base} answered {resp.status_code} instead of this server, so the agent's memory lookups will fail."
+        return None
+    except Exception:
+        return (
+            f"{base} is not answering from the internet (a tunnel that was closed or restarted gets a new address). "
+            "The agent will not be able to look anything up until the address is live and set as MCP_SERVER_URL."
+        )
+
+
+async def memory_server_problem() -> Optional[str]:
+    """
+    Why an agent in a call cannot reach this server's meeting memory, or None.
+
+    MeetStream calls MCP_SERVER_URL from the internet. A localhost or http
+    address is refused outright; a Cloudflare quick tunnel gets a new
+    address every time it starts, so an agent wired to yesterday's is
+    calling a name that no longer exists. Either way every memory question
+    in the call used to hang until the tool timeout and come back empty,
+    with nothing on screen saying why. Probed through the public address
+    itself (GET /health), cached briefly so pages that show it stay cheap.
+    """
+    url = (settings.MCP_SERVER_URL or "").strip()
+    now = time.monotonic()
+    if _probe_cache["url"] == url and now - _probe_cache["at"] < _PROBE_TTL_SECONDS:
+        return _probe_cache["problem"]
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    problem: Optional[str] = None
+    if not url:
+        problem = "No public server address is set (MCP_SERVER_URL), so the agent has no way to reach meeting memory."
+    elif parsed.scheme != "https" or host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+        problem = (
+            f"The agent is pointed at {url}, which MeetStream cannot reach - it needs a public https address. "
+            "Until then it can hear the call but cannot look anything up."
+        )
+    else:
+        problem = await _health_problem(f"{parsed.scheme}://{parsed.netloc}")
+    _probe_cache.update(url=url, at=now, problem=problem)
+    return problem
 
 
 async def get_meetstream_api_key(db: AsyncSession, user_id: uuid.UUID) -> Optional[str]:
@@ -189,7 +319,7 @@ async def get_all_claimed_agent_ids(db: AsyncSession) -> set:
     return claimed
 
 
-async def ensure_mcp_wired(agent_config_id: str, mcp_token: Optional[str], api_key: Optional[str] = None) -> None:
+async def ensure_mcp_wired(agent_config_id: str, mcp_token: Optional[str], api_key: Optional[str] = None) -> Dict[str, Any]:
     """
     Only agents created through this app's "New agent" form get wired to our
     MCP server (database access) at creation time - an agent set up any other
@@ -198,13 +328,21 @@ async def ensure_mcp_wired(agent_config_id: str, mcp_token: Optional[str], api_k
     until it silently failed to recall anything. Patch the wiring in
     on every activation so that trap can't happen. Wires it to the activating
     workspace's own mcp_token so tool calls resolve to the right workspace.
+
+    Returns what the agent can do afterwards - {"memory", "chat", "problem"}
+    - rather than swallowing a failure: an activation that "succeeded" while
+    MeetStream had refused the wiring left an agent with no tools at all,
+    answering memory questions by guessing.
     """
-    if not settings.MCP_SERVER_URL or not mcp_token:
-        return
+    problem = await memory_server_problem()
+    if problem:
+        return {"memory": False, "chat": False, "problem": problem}
+    if not mcp_token:
+        return {"memory": False, "chat": False, "problem": "This workspace has no MCP token, so the agent cannot be connected to its memory."}
     try:
         current = await meetstream_client.get_mia_agent(agent_config_id, api_key=api_key)
-    except Exception:
-        return
+    except Exception as exc:
+        return {"memory": False, "chat": False, "problem": f"Could not read the agent from MeetStream: {exc}"}
     current_cfg = current.get("agent_config", current)
     current_agent: Dict[str, Any] = dict(current_cfg.get("Agent") or {})
     mcp_servers = list(current_agent.get("mcp_servers") or [])
@@ -226,33 +364,43 @@ async def ensure_mcp_wired(agent_config_id: str, mcp_token: Optional[str], api_k
         and (f.get("headers") or {}).get("Authorization") == wanted_fn.get("headers", {}).get("Authorization")
         for f in custom_functions
     )
-    if mcp_ok and chat_fn_ok:
-        return
+    timeout_ok = bool(mcp_servers) and mcp_servers[0].get("timeout") == MCP_TOOL_TIMEOUT_SECONDS
+    if mcp_ok and chat_fn_ok and timeout_ok:
+        return {"memory": True, "chat": True, "problem": None}
 
-    if not mcp_ok:
-        existing_tools = set(mcp_servers[0].get("allowed_tools") or []) if mcp_servers else set()
-        default_tools = {"get_current_datetime", "search_meeting_memory", "get_meeting", "get_previous_meetings", "get_action_items"}
-        server_config = {
-            "name": "Meet Companion MCP",
-            "url": settings.MCP_SERVER_URL,
-            "timeout": 30,
-            "active": True,
-            "allowed_tools": sorted(existing_tools | default_tools),
-            "headers": {"Authorization": f"Bearer {mcp_token}"},
-        }
-        current_agent["mcp_servers"] = [server_config]
+    existing_tools = set(mcp_servers[0].get("allowed_tools") or []) if mcp_servers else set()
+    default_tools = {"get_current_datetime", "search_meeting_memory", "get_meeting", "get_previous_meetings", "get_action_items"}
+    current_agent["mcp_servers"] = [{
+        "name": "Meet Companion MCP",
+        "url": settings.MCP_SERVER_URL,
+        "timeout": MCP_TOOL_TIMEOUT_SECONDS,
+        "active": True,
+        "allowed_tools": sorted(existing_tools | default_tools),
+        "headers": {"Authorization": f"Bearer {mcp_token}"},
+    }]
+    without_chat = [f for f in custom_functions if f.get("name") != "share_in_chat"]
+    current_agent["custom_functions"] = [*without_chat, wanted_fn]
 
-    if not chat_fn_ok:
-        custom_functions = [f for f in custom_functions if f.get("name") != "share_in_chat"]
-        custom_functions.append(wanted_fn)
-        current_agent["custom_functions"] = custom_functions
+    def _reason(exc: Exception) -> str:
+        return (getattr(getattr(exc, "response", None), "text", "") or str(exc))[:300]
 
     try:
         await meetstream_client.update_mia_agent_settings(agent_config_id=agent_config_id, agent=current_agent, api_key=api_key)
+        return {"memory": True, "chat": True, "problem": None}
     except Exception as exc:
-        # Activation still succeeds - the agent just keeps its previous wiring.
-        detail = getattr(getattr(exc, "response", None), "text", "") or str(exc)
-        logger.warning(f"Could not re-wire agent {agent_config_id} to {settings.MCP_SERVER_URL}: {detail[:300]}")
+        first = _reason(exc)
+    # MeetStream refuses the whole update over one bad field - it has
+    # rejected the chat function's URL (quick tunnels, plain http) while the
+    # memory server itself was fine. Memory matters more: retry without it.
+    current_agent["custom_functions"] = without_chat
+    try:
+        await meetstream_client.update_mia_agent_settings(agent_config_id=agent_config_id, agent=current_agent, api_key=api_key)
+        logger.warning(f"Agent {agent_config_id} wired to memory without share_in_chat: {first}")
+        return {"memory": True, "chat": False, "problem": None}
+    except Exception as exc:
+        detail = _reason(exc)
+        logger.warning(f"Could not wire agent {agent_config_id} to {settings.MCP_SERVER_URL}: {detail}")
+        return {"memory": False, "chat": False, "problem": f"MeetStream refused to connect the agent to this server: {detail}"}
 
 
 def get_agent_template() -> Dict[str, Any]:

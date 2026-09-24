@@ -183,6 +183,13 @@ async def process_webhook_event_async(
                         status="in_meeting",
                         started_at=datetime.now(timezone.utc),
                     )
+                    # Admitted: the moment the introduction can reach the chat
+                    # (the bot watcher does the same for installs that never
+                    # get this webhook; whichever is first posts it).
+                    from app.services.bot_watch import send_intro_once
+                    from app.api.agent import get_meetstream_api_key
+                    key = await get_meetstream_api_key(db, meeting.created_by_user_id) if meeting.created_by_user_id else None
+                    await send_intro_once(db, meeting, key, client=meetstream_client)
 
             elif event_type == "bot.recording":
                 if meeting:

@@ -1,17 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Page, PageHeader } from '../components/AppShell'
 import { AskAiIcon, CheckIcon, PlusIcon, RobotIcon, TrashIcon } from '../components/Icons'
-import {
-  Badge,
-  Card,
-  EmptyState,
-  ErrorMessage,
-  Field,
-  Loading,
-  Modal,
-  SectionCard,
-  Spinner,
-} from '../components/ui'
+import { Badge, Card, EmptyState, ErrorMessage, Field, Loading, Modal, Notice, SectionCard, Spinner } from '../components/ui'
 import {
   activateAgent,
   createAgent,
@@ -438,6 +428,8 @@ export default function Agent() {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [activatingId, setActivatingId] = useState(null)
+  // What the last activation could not wire up (null when it all worked).
+  const [wiringNotice, setWiringNotice] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
   const [newOpen, setNewOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
@@ -582,8 +574,16 @@ export default function Agent() {
 
   async function activate(agentConfigId) {
     setActivatingId(agentConfigId)
+    setWiringNotice(null)
     try {
-      await activateAgent(agentConfigId)
+      const result = await activateAgent(agentConfigId)
+      // Activation used to report success while MeetStream had refused to
+      // connect the agent to memory; say what it can actually do.
+      const wiring = result?.wiring
+      if (wiring?.problem) setWiringNotice(wiring.problem)
+      else if (wiring && wiring.memory && !wiring.chat) {
+        setWiringNotice('Connected to meeting memory, but MeetStream refused the "share in chat" tool, so the agent can answer out loud but not post into the chat.')
+      }
       setSelected('active')
       await Promise.all([loadAgents(), loadConfig()])
     } catch (err) {
@@ -796,6 +796,14 @@ export default function Agent() {
                   </button>
                 )}
               </div>
+
+              {(wiringNotice || config.MemoryProblem) && (
+                <div className="mb-4">
+                  <Notice title="This agent can't look anything up in a call yet">
+                    {wiringNotice || config.MemoryProblem}
+                  </Notice>
+                </div>
+              )}
 
               <InteractionModePicker
                 agentConfigId={config.AgentConfigID}

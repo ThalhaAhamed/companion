@@ -112,6 +112,23 @@ export function Badge({ children, tone = 'neutral' }) {
   )
 }
 
+/**
+ * Something the person should know before it bites them - not an error, the
+ * action still works. Peach, the design system's warning colour.
+ */
+export function Notice({ title, children }) {
+  return (
+    <div
+      role="status"
+      className="rounded-lg px-3 py-2 text-xs"
+      style={{ backgroundColor: 'var(--color-peach-200)', color: 'var(--color-peach-700)' }}
+    >
+      {title && <strong className="block">{title}</strong>}
+      {children}
+    </div>
+  )
+}
+
 /** Live state of a connection, as a dot + word: Connected / Not reachable / Checking… */
 export function ConnectionBadge({ connected }) {
   const state =

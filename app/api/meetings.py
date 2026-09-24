@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.connection import get_db
-from app.database.repositories import MeetingRepository, TranscriptRepository
+from app.database.repositories import MeetingRepository, OrganizationRepository, TranscriptRepository
 from app.models.schemas import (
     MeetingCreate, MeetingUpdate, MeetingResponse, MeetingDetailResponse,
     ParticipantResponse, MemoryResponse, ActionItemResponse, TranscriptSegmentResponse
@@ -21,7 +21,7 @@ from app.models.schemas import (
 from app.services.meetstream import meetstream_client
 from app.api.agent import get_active_agent_config_id, _DEFAULT_FIRST_MESSAGE, _require_claimable_agent, get_meetstream_api_key, require_meetstream_api_key
 from app.services.bot_watch import ready_transcript_id
-from app.services.agents import MODE_CHAT, MODE_VOICE, interaction_mode_of
+from app.services.agents import MODE_CHAT, MODE_VOICE, ensure_mcp_wired, interaction_mode_of, repair_agent_model
 from app.api.deps import get_current_org_id, get_current_user
 from app.models.database import User
 import logging
@@ -123,17 +123,28 @@ async def create_meeting(
                 except Exception:
                     pass
 
-            # Posted to the meeting chat the instant the bot joins - reliable
-            # and independent of the realtime model's own behavior, unlike
-            # trying to get the LLM to proactively speak an introduction
-            # (which realtime voice agents don't do consistently).
-            bot_message = _first_message(bot_name, mode)
+                # Point the agent at this server's current address before it
+                # joins. A tunnel that restarted has a new one, and the agent
+                # kept calling the old, dead name for every memory question -
+                # the docs asked people to re-activate after every restart,
+                # which nobody remembers to do mid-meeting.
+                org = await OrganizationRepository(db).get_by_id(org_id)
+                wiring = await ensure_mcp_wired(active_agent_config_id, org.mcp_token if org else None, api_key=own_meetstream_key)
+                if wiring.get("problem"):
+                    logger.warning(f"Launching with agent {active_agent_config_id} that cannot reach memory: {wiring['problem']}")
+                await repair_agent_model(active_agent_config_id, api_key=own_meetstream_key, voice=False)
+
+            # The introduction is posted into the chat by this server once the
+            # bot has been admitted (app.services.bot_watch.send_intro_once),
+            # not handed to MeetStream as bot_message: that is posted "when
+            # the bot joins", which on Google Meet is the waiting room, where
+            # it cannot reach the chat and was lost.
+            intro_message = _first_message(bot_name, mode)
 
             bot_resp = await meetstream_client.create_bot(
                 meeting_link=meeting.meeting_url,
                 agent_config_id=active_agent_config_id,
                 callback_url=f"{settings.MCP_SERVER_URL.replace('/mcp', '')}/api/webhooks/meetstream",
-                bot_message=bot_message,
                 custom_attributes={
                     "organization_id": str(org_id),
                     "meeting_id": str(meeting.id),
@@ -146,6 +157,7 @@ async def create_meeting(
             bot_id = bot_resp.get("bot_id") or bot_resp.get("id")
             transcript_id = bot_resp.get("transcript_id")
             if bot_id:
+                meeting.custom_attributes = {**(meeting.custom_attributes or {}), "intro_message": intro_message}
                 await meeting_repo.update_status(
                     meeting.id,
                     status="joining",

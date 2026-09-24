@@ -172,7 +172,7 @@ npm --prefix frontend run lint      # oxlint, 0 errors
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Meeting stuck at *Extracting…* | MeetStream cannot reach your server | Public URL or tunnel in `MCP_SERVER_URL`, re-activate the agent |
+| Meeting stuck at *Extracting…* | MeetStream cannot reach your server | Public URL or tunnel in `MCP_SERVER_URL`; the next launch re-points the agent |
 | *Processed without AI (…)* | Provider failed; the bracket says why | Fix it in Settings (e.g. `ollama pull <model>`), then **Reprocess** |
 | Database *Not reachable* | Host, credentials or SSL | The banner carries the driver's message; Neon/Supabase strings paste as-is |
 | Blank page after upgrading from v0.2 | Accounts predating workspaces | Fixed in v0.3.1 — upgrade |

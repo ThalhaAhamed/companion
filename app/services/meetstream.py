@@ -325,9 +325,10 @@ class MeetStreamClient:
         mode: str = "realtime",
         mcp_server_url: Optional[str] = None,
         mcp_auth_token: Optional[str] = None,
-        response_modality: str = "text",
+        response_modality: str = "audio",
         tool_results_to_chat: bool = True,
         api_key: Optional[str] = None,
+        extra_model: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Create a brand new MIA agent, pre-wired to our own MCP server the same way
@@ -340,7 +341,7 @@ class MeetStreamClient:
             server_config: Dict[str, Any] = {
                 "url": mcp_server_url,
                 "name": "Meet Companion MCP",
-                "timeout": 30,
+                "timeout": 10,  # MeetStream's default; see agents.MCP_TOOL_TIMEOUT_SECONDS
                 "active": True,
                 "allowed_tools": [
                     "get_current_datetime",
@@ -368,6 +369,7 @@ class MeetStreamClient:
                 "system_prompt": system_prompt,
                 "first_message": first_message,
                 "temperature": temperature,
+                **(extra_model or {}),
             },
             "agent": {
                 "mcp_servers": mcp_servers,

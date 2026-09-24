@@ -121,5 +121,9 @@ async def test_the_join_message_matches_the_mode(authed_client, monkeypatch, mod
     # The agent joins in both modes - chat mode is how it answers, not whether it listens.
     assert created["agent_config_id"] == "ag-1"
     assert created["bot_name"] == "Ada"
-    assert ("answer here in the chat" in created["bot_message"]) is expects_chat_intro
-    assert ("Ada, what did we decide last time?" in created["bot_message"])
+    # Not handed to MeetStream to post on join (that lands in the waiting
+    # room); kept to be posted once the bot is admitted.
+    assert "bot_message" not in created
+    intro = r.json()["custom_attributes"]["intro_message"]
+    assert ("answer here in the chat" in intro) is expects_chat_intro
+    assert "Ada, what did we decide last time?" in intro

@@ -30,6 +30,11 @@ from app.models.database import Meeting
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 20
+#: While a bot is waiting to be let in, poll faster: the introduction is
+#: posted the moment it is admitted, and a 20-second lag there is noticeable.
+JOINING_POLL_SECONDS = 5
+#: Tries at posting the introduction before giving up on it.
+INTRO_ATTEMPTS = 3
 #: A bot MeetStream still calls live this long after launch is not coming back.
 STALE_LIVE_AFTER = timedelta(hours=24)
 #: How long after the call ends to keep waiting for MeetStream's transcript.
@@ -119,6 +124,48 @@ def transcription_failure(runs: Iterable[Dict[str, Any]]) -> Optional[str]:
     return str(real[0].get("error") or real[0].get("message") or "").strip() or "transcription failed"
 
 
+#: Meetings whose introduction this process has posted or is posting. The
+#: watcher and the bot.inmeeting webhook both learn of admission, in this
+#: same process; this, not the stored flag (a session can hold a stale copy
+#: of it), is what keeps the introduction from going out twice.
+_intro_claimed: set = set()
+
+
+async def send_intro_once(db, meeting: Meeting, api_key: Optional[str], client=None) -> bool:
+    """
+    Post the bot's introduction into the meeting chat, once, after it is in.
+
+    It used to go to MeetStream as bot_message at launch, which MeetStream
+    posts "when the bot joins" - and on Google Meet the bot joins into the
+    waiting room, where a participant cannot post to chat. The message was
+    lost in exactly the calls with a waiting room, which is most of them.
+    Sent from here it goes out once the bot has been admitted.
+    """
+    attrs = dict(meeting.custom_attributes or {})
+    text = attrs.get("intro_message")
+    if not text or attrs.get("intro_sent") or meeting.id in _intro_claimed:
+        return False
+    attempts = int(attrs.get("intro_attempts") or 0)
+    if attempts >= INTRO_ATTEMPTS:
+        return False
+    _intro_claimed.add(meeting.id)
+    if client is None:
+        from app.services.meetstream import meetstream_client as client
+    try:
+        await client.send_bot_message(meeting.meetstream_bot_id, text, api_key=api_key)
+        attrs["intro_sent"] = True
+    except Exception as exc:
+        # Let a later sweep try again.
+        _intro_claimed.discard(meeting.id)
+        attrs["intro_attempts"] = attempts + 1
+        logger.warning("Could not post the introduction for meeting %s: %s", meeting.id, exc)
+    # A new dict, not an in-place change: the JSON column only notices
+    # reassignment.
+    meeting.custom_attributes = attrs
+    await db.flush()
+    return bool(attrs.get("intro_sent"))
+
+
 def _aware(value: Optional[datetime]) -> Optional[datetime]:
     # SQLite hands timestamps back naive; they were stored as UTC.
     if value is not None and value.tzinfo is None:
@@ -133,6 +180,8 @@ class BotWatcher:
         self.poll_seconds = poll_seconds
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
+        # Set by a sweep that found a bot still waiting to be let in.
+        self._someone_joining = False
 
     @property
     def client(self):
@@ -175,8 +224,9 @@ class BotWatcher:
                 raise
             except Exception as exc:  # the loop must outlive any one bad sweep
                 logger.warning("Bot watcher sweep failed: %s", exc)
+            wait = min(self.poll_seconds, JOINING_POLL_SECONDS) if self._someone_joining else self.poll_seconds
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
+                await asyncio.wait_for(self._stop.wait(), timeout=wait)
             except asyncio.TimeoutError:
                 pass
 
@@ -185,6 +235,7 @@ class BotWatcher:
     async def sweep(self) -> List[uuid.UUID]:
         """Bring every awaited meeting up to date; returns the ids sent to the pipeline."""
         claimed: List[tuple[uuid.UUID, str]] = []
+        self._someone_joining = False
         async with get_db_context() as db:
             repo = MeetingRepository(db)
             for meeting in await repo.list_awaiting_bot():
@@ -245,6 +296,11 @@ class BotWatcher:
             changes["ended_at"] = now
         if changes:
             await repo.update_status(meeting.id, **changes)
+
+        if status == "joining":
+            self._someone_joining = True
+        elif status in ("in_meeting", "recording"):
+            await send_intro_once(db, meeting, api_key, client=self.client)
 
         if status in MeetingRepository.LIVE_STATUSES:
             if now - _aware(meeting.created_at) > STALE_LIVE_AFTER:
