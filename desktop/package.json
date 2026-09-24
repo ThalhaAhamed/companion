@@ -45,7 +45,7 @@
       "artifactName": "MeetCompanion-Windows-Setup.${ext}"
     },
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "target": [{ "target": "dmg" }],
       "icon": "build-resources/icon.png",
       "category": "public.app-category.productivity",
       "artifactName": "MeetCompanion-macOS-${arch}.${ext}"

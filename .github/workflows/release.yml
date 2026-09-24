@@ -91,6 +91,14 @@ jobs:
         run: |
           bash ../scripts/retry.sh npm ci
           bash ../scripts/retry.sh npx electron-builder ${{ matrix.target }} --publish never
+          # Each macOS job must produce only its own chip's .dmg: the two jobs'
+          # files share names, and a second copy from the wrong machine would
+          # overwrite the right one when the release is assembled.
+          if [[ "${{ matrix.target }}" == *--mac* ]]; then
+            dmgs=$(ls release/*.dmg)
+            [ "$(echo "$dmgs" | wc -l)" -eq 1 ] || { echo "Expected one .dmg, got: $dmgs"; exit 1; }
+            echo "Built $dmgs"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
