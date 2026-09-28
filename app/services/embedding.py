@@ -72,6 +72,20 @@ class EmbeddingService:
         # startup warmup and any concurrent request that beats it there) - guard
         # against loading the multi-hundred-MB model twice in parallel.
         self._init_lock = threading.Lock()
+        # embed_batch runs in worker threads too, and fastembed's TextEmbedding
+        # shares a single tokenizer and ONNX session across every call - neither
+        # is documented as safe for two threads calling .embed() at once. Left
+        # unguarded, two notes saved (or a note save racing background meeting
+        # processing) at the same moment could have their token batches
+        # interleaved: a batch of encodings that should all be padded to one
+        # length comes back with mismatched lengths, and
+        # np.array([e.ids for e in encoded]) raises "setting an array element
+        # with a sequence" - seen intermittently in CI (test_notebook.py::
+        # test_question_about_the_end_of_a_long_note_still_finds_it), never
+        # locally, exactly the signature of a timing-dependent race. Since the
+        # model is already pinned to threads=1 internally, serializing calls
+        # from the outside costs nothing but strict correctness.
+        self._embed_lock = threading.Lock()
 
     def _init_model(self):
         if self._initialized:
@@ -139,23 +153,50 @@ class EmbeddingService:
             for t in texts
         ]
 
-        if self._model is not None:
-            return [np.asarray(vec, dtype=np.float32).tolist() for vec in self._model.embed(clean_texts)]
+        # One embedding computation at a time process-wide - see the comment
+        # on _embed_lock in __init__ for why this has to be unconditional,
+        # not just around the fastembed branch: the fallback branch below is
+        # cheap enough that contention here is never the bottleneck.
+        with self._embed_lock:
+            if self._model is not None:
+                # One document per call to the model, not the whole list in
+                # one batch. Batching relies on fastembed padding every
+                # encoding in the call to one uniform length before handing
+                # them to numpy; that padding failed intermittently in CI for
+                # a batch of two pieces of a long note (different lengths
+                # came back for what should have been one padded length),
+                # and it reproduced on a CI Linux runner with a freshly
+                # downloaded model but not on this Windows machine with
+                # either a warm or a from-scratch cache - environment- or
+                # platform-dependent in fastembed/tokenizers/onnxruntime
+                # itself, not something this service can fix upstream. A
+                # single-document call has nothing to pad against, so it
+                # cannot produce this failure by construction, at the cost
+                # of the batching speedup (embedding is background work
+                # here, never a request's hot path).
+                vectors = [np.asarray(next(iter(self._model.embed([text]))), dtype=np.float32) for text in clean_texts]
+                lengths = {len(v) for v in vectors}
+                if len(lengths) > 1:
+                    # Would have been the same numpy crash one level up;
+                    # caught here with the actual shapes, for a log that
+                    # says something a stack trace from np.asarray would not.
+                    raise ValueError(f"embedding model returned mismatched vector lengths: {sorted(lengths)}")
+                return [v.tolist() for v in vectors]
 
-        # Deterministic lightweight fallback (e.g. if PyTorch cannot load on low disk space)
-        # Generates a normalized 384-dimensional vector based on token hashing
-        results = []
-        for text in clean_texts:
-            vec = np.zeros(self.dimension, dtype=np.float32)
-            words = text.lower().split()
-            for word in words:
-                h = hash(word) % self.dimension
-                vec[h] += 1.0
-            norm = np.linalg.norm(vec)
-            if norm > 0:
-                vec = vec / norm
-            results.append(vec.tolist())
-        return results
+            # Deterministic lightweight fallback (e.g. if PyTorch cannot load on low disk space)
+            # Generates a normalized 384-dimensional vector based on token hashing
+            results = []
+            for text in clean_texts:
+                vec = np.zeros(self.dimension, dtype=np.float32)
+                words = text.lower().split()
+                for word in words:
+                    h = hash(word) % self.dimension
+                    vec[h] += 1.0
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec = vec / norm
+                results.append(vec.tolist())
+            return results
 
 
 embedding_service = EmbeddingService()
