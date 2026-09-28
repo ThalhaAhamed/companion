@@ -21,6 +21,8 @@
 <sub>▶ <a href="https://youtu.be/CbeteL37fuo"><b>Watch the full demo on YouTube</b></a> (12 min)</sub>
 </div>
 
+&nbsp;
+
 Send a bot into your call via **[MeetStream](https://meetstream.ai)** (Google Meet, Zoom, Teams) — as soon as the meeting finishes, Meet Companion **automatically retrieves the transcript**, runs it through your chosen LLM to extract summaries, key decisions, and action items with deadlines, and files everything into organized Markdown notes. You can also paste or import existing transcripts directly without needing an account. Everything after the call runs on infrastructure you own: meetings become **Markdown notes with live action-item checkboxes**, searchable **semantically**, and answerable with **Ask AI** — plus an in-call agent that can recall "what did we decide last time?" *during* your next meeting. Built for teams and individuals who run their own tools and want meeting intelligence that stays completely theirs.
 
 ## 🚀 Quick start
