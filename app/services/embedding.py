@@ -18,6 +18,8 @@ import asyncio
 import os
 import shutil
 import threading
+import time
+import zlib
 import numpy as np
 from pathlib import Path
 from typing import List, Union
@@ -25,6 +27,9 @@ from app.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+#: How long after a failed model load the next embedding call tries again.
+MODEL_RETRY_SECONDS = 600
 
 
 def _fastembed_name(model_name: str) -> str:
@@ -86,13 +91,25 @@ class EmbeddingService:
         # model is already pinned to threads=1 internally, serializing calls
         # from the outside costs nothing but strict correctness.
         self._embed_lock = threading.Lock()
+        # A failed load is tried again after a while (the weights may still
+        # have been downloading, or the disk was full) instead of leaving the
+        # process on the fallback until it restarts.
+        self._retry_at = 0.0
+
+    @property
+    def using_fallback(self) -> bool:
+        """True while vectors come from the hash fallback, not the model."""
+        return self._initialized and self._model is None
 
     def _init_model(self):
-        if self._initialized:
+        if self._initialized and (self._model is not None or time.monotonic() < self._retry_at):
             return
         with self._init_lock:
-            if self._initialized:
+            if self._initialized and (self._model is not None or time.monotonic() < self._retry_at):
                 return
+            # Set before trying, so calls made while a retry is under way use
+            # the fallback instead of queueing behind a slow download.
+            self._retry_at = time.monotonic() + MODEL_RETRY_SECONDS
             try:
                 from fastembed import TextEmbedding
 
@@ -184,13 +201,15 @@ class EmbeddingService:
                 return [v.tolist() for v in vectors]
 
             # Deterministic lightweight fallback (e.g. if PyTorch cannot load on low disk space)
-            # Generates a normalized 384-dimensional vector based on token hashing
+            # Generates a normalized 384-dimensional vector based on token hashing.
+            # crc32, not hash(): Python salts str hashes per process, so the
+            # same word landed in a different slot after every restart.
             results = []
             for text in clean_texts:
                 vec = np.zeros(self.dimension, dtype=np.float32)
                 words = text.lower().split()
                 for word in words:
-                    h = hash(word) % self.dimension
+                    h = zlib.crc32(word.encode("utf-8")) % self.dimension
                     vec[h] += 1.0
                 norm = np.linalg.norm(vec)
                 if norm > 0:

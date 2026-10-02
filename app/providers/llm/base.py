@@ -21,7 +21,21 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 
 
 class LLMError(RuntimeError):
-    """Raised when a provider cannot fulfil a completion request."""
+    """
+    Raised when a provider cannot fulfil a completion request.
+
+    `transient` marks a failure worth one more try: rate limits, server
+    errors, a connection dropped mid-reply. A model still loading onto the
+    GPU answers 500 for a few seconds; without a retry that one cold start
+    left the meeting on the rule-based fallback for good.
+    """
+
+    def __init__(self, message: str = "", *, status_code: Optional[int] = None, transient: Optional[bool] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        if transient is None:
+            transient = status_code is not None and (status_code == 429 or status_code >= 500)
+        self.transient = transient
 
 
 class LLMConfigError(LLMError):
@@ -129,7 +143,18 @@ class LLMProvider(ABC):
                 messages, json_mode=json_mode, temperature=temperature, max_tokens=max_tokens
             )
         except httpx.HTTPError as exc:
-            raise LLMError(f"Could not reach {self.label} at {self.base_url}: {exc}") from exc
+            # Refused or timed out: retrying will not help soon enough. A
+            # connection cut mid-reply (the server crashed or restarted) may.
+            dropped = isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError))
+            raise LLMError(f"Could not reach {self.label} at {self.base_url}: {exc}", transient=dropped) from exc
+        except json.JSONDecodeError as exc:
+            # A 200 with an HTML page - a proxy's error page, or a base URL
+            # pointing at a website - used to escape as JSONDecodeError and
+            # fail the meeting instead of taking the fallback.
+            raise LLMError(
+                f"{self.label} at {self.base_url} answered with something that is not JSON. "
+                "Check that the base URL points at the API itself."
+            ) from exc
 
     @abstractmethod
     async def _complete(

@@ -115,7 +115,13 @@ any other way must be restarted to pick up Python changes.
 - `app/api/webhooks.py` accepts MeetStream deliveries. With a signing secret
   configured they are HMAC-verified; without one, only events for bots this
   install launched are accepted. Events are idempotent on
-  `(bot_id, event_type, timestamp)`.
+  `(bot_id, event_type, timestamp)` (a hash of the body when there is no
+  timestamp), and a lifecycle event only ever moves a meeting forward.
+- Reprocess replaces a meeting's memories in the same transaction that
+  stores the new ones, and matches its extracted action items against the
+  new run (`ActionItemRepository.replace_extracted`): ticks and tasks written
+  by hand survive. A note a person edited (`Note.edited_by_user`) keeps its
+  text; only its task lines are brought up to date.
 - `app/middleware/auth_gate.py` decides what is reachable signed-out
   (`EXEMPT_PREFIXES`, `BOOT_PATHS`) and when first-run setup is open (only
   with no saved config **and** no account). Changing this is a security

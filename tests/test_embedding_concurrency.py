@@ -172,3 +172,28 @@ def test_a_model_that_still_returns_mismatched_lengths_is_reported_plainly():
 
     with pytest.raises(ValueError, match="mismatched vector lengths"):
         svc.embed_batch(["piece one", "piece two"])
+
+
+def test_the_fallback_vector_is_the_same_in_every_process():
+    """
+    The fallback hashed words with hash(), which Python salts per process:
+    the same text got a different vector after every restart, so nothing
+    stored before a restart matched a search after it.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = (
+        "from app.services.embedding import EmbeddingService\n"
+        "s = EmbeddingService(); s._initialized = True; s._retry_at = float('inf')\n"
+        "v = s.embed_text('apollo launch moved to november')\n"
+        "print([i for i, x in enumerate(v) if x])"
+    )
+    root = Path(__file__).resolve().parents[1]
+    runs = {
+        subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, check=True,
+                       env={**__import__("os").environ, "PYTHONHASHSEED": seed}).stdout
+        for seed in ("1", "2")
+    }
+    assert len(runs) == 1

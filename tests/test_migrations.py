@@ -153,3 +153,46 @@ async def test_prealembic_accounts_get_a_membership_on_upgrade():
         assert [(m.user_id, m.organization_id, m.role) for m in rows] == [(user_id, org_id, "owner")]
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_old_notes_table_gets_edited_by_user_and_keeps_its_edits():
+    """
+    Adoption used to stamp head, so a revision that adds a column to an
+    existing table never ran on a pre-Alembic database. A meeting's note a
+    person had edited (updated well after it was written) stays protected.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.database.bootstrap import bootstrap
+
+    engine = create_async_engine(_fresh_url())
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda c: Base.metadata.create_all(c))
+            await conn.execute(text("ALTER TABLE notes DROP COLUMN edited_by_user"))
+            org_id, meeting_id = uuid.uuid4(), uuid.uuid4()
+            written = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
+            await conn.execute(text(
+                "INSERT INTO organizations (id, name, slug, settings, mcp_token, created_at, updated_at) "
+                "VALUES (:id, 'Old', 'old', '{}', 'tok', :now, :now)"
+            ), {"id": org_id.hex, "now": written.isoformat()})
+            await conn.execute(text(
+                "INSERT INTO meetings (id, organization_id, title, status, processing_status, custom_attributes, created_at, updated_at) "
+                "VALUES (:id, :org, 'Sync', 'completed', 'completed', '{}', :now, :now)"
+            ), {"id": meeting_id.hex, "org": org_id.hex, "now": written.isoformat()})
+            for title, updated in (("edited", written + timedelta(hours=2)), ("untouched", written)):
+                await conn.execute(text(
+                    "INSERT INTO notes (id, organization_id, meeting_id, title, content, note_type, tags, is_favorite, created_at, updated_at) "
+                    "VALUES (:id, :org, :meeting, :title, 'x', 'meeting', '[]', 0, :created, :updated)"
+                ), {"id": uuid.uuid4().hex, "org": org_id.hex, "meeting": meeting_id.hex, "title": title,
+                    "created": written.isoformat(), "updated": updated.isoformat()})
+
+        await bootstrap(engine)
+
+        assert await _version(engine) == _head_revision()
+        async with engine.connect() as conn:
+            rows = dict((await conn.execute(text("SELECT title, edited_by_user FROM notes"))).all())
+        assert {title: bool(flag) for title, flag in rows.items()} == {"edited": True, "untouched": False}
+    finally:
+        await engine.dispose()

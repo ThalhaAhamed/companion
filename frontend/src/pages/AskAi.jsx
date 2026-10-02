@@ -135,13 +135,20 @@ export default function AskAi() {
     const trimmed = (text ?? question).trim()
     if (!trimmed || busy) return
 
+    // The conversation so far goes with the question, so a follow-up such as
+    // "who owns it now?" is answered about what "it" was. Errors aren't turns.
+    const history = thread
+      .filter((entry) => entry.text)
+      .slice(-6)
+      .map((entry) => ({ role: entry.role, content: entry.text }))
+
     setBusy(true)
     setError(null)
     setQuestion('')
     setThread((current) => [...current, { role: 'user', text: trimmed }])
 
     try {
-      const payload = { question: trimmed }
+      const payload = { question: trimmed, history }
       if (scope === 'favorites') payload.favorites_only = true
       else if (scope !== 'all') payload.folder_id = scope
 
@@ -234,8 +241,16 @@ export default function AskAi() {
                         Sources:
                       </span>
                       {entry.sources?.map((source) => (
-                        <Link key={source.id} to={`/notebook/${source.id}`}>
-                          <Badge tone="brand">{source.title}</Badge>
+                        // Only what the answer cited: a note, or a meeting it quoted from.
+                        <Link
+                          key={`${source.kind}-${source.id}`}
+                          to={source.kind === 'meeting' ? `/meetings/${source.id}` : `/notebook/${source.id}`}
+                          title={source.date ? `${source.kind === 'meeting' ? 'Meeting' : 'Note'} · ${source.date}` : undefined}
+                        >
+                          <Badge tone="brand">
+                            {source.kind === 'meeting' ? '🎙 ' : ''}
+                            {source.title}
+                          </Badge>
                         </Link>
                       ))}
                       {entry.documents?.map((doc) => (

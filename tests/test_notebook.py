@@ -396,9 +396,8 @@ async def test_sync_is_idempotent_and_respects_edits(authed_client):
     notes = (await authed_client.get("/api/notebook/notes", params={"meeting_id": str(meeting_id)})).json()
     note_id = notes["notes"][0]["id"]
 
-    # A person edits the note; regeneration must not clobber it.
-    import asyncio
-    await asyncio.sleep(2.1)
+    # A person edits the note - straight away, which the old two-second rule
+    # missed - and regeneration must not clobber it.
     await authed_client.patch(f"/api/notebook/notes/{note_id}", json={"content": "my own words"})
     result = (await authed_client.post("/api/notebook/sync-meetings")).json()
     assert result["skipped"] == 1
@@ -682,3 +681,39 @@ async def test_delete_meeting_returns_no_content(authed_client):
     r = await authed_client.delete(f"/api/meetings/{m['id']}")
     assert r.status_code == 204 and r.content == b""
     assert (await authed_client.get(f"/api/meetings/{m['id']}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_note_saved_without_the_model_gets_a_real_vector_later(authed_client, monkeypatch):
+    """
+    While the embedding model could not load, notes were stored with hash
+    vectors - the model's width, none of its meaning - indistinguishable from
+    real ones and never replaced. Now they get none, and one once it loads.
+    """
+    import time
+    import uuid
+
+    from app.api.notebook import embed_missing_notes
+    from app.database.connection import AsyncSessionLocal
+    from app.models.database import Note
+    from app.services.embedding import embedding_service
+
+    await embedding_service.warmup_async()
+    model = embedding_service._model
+    if model is None:
+        pytest.skip("embedding model not available here")
+
+    monkeypatch.setattr(embedding_service, "_model", None)
+    monkeypatch.setattr(embedding_service, "_retry_at", time.monotonic() + 600)
+    note = (await authed_client.post("/api/notebook/notes", json={"title": "Zurich", "content": "The migration is on 3 November."})).json()
+    async with AsyncSessionLocal() as s:
+        stored = await s.get(Note, uuid.UUID(note["id"]))
+        assert stored.embedding is None
+        stamp = stored.updated_at
+
+    monkeypatch.setattr(embedding_service, "_model", model)
+    assert await embed_missing_notes() == 1
+    async with AsyncSessionLocal() as s:
+        stored = await s.get(Note, uuid.UUID(note["id"]))
+        assert stored.embedding is not None and len(stored.embedding) == embedding_service.dimension
+        assert stored.updated_at == stamp  # a vector is not an edit

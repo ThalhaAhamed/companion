@@ -120,10 +120,15 @@ async def ensure_schema(engine: AsyncEngine) -> None:
                 await conn.run_sync(Base.metadata.create_all)
             await _patch_action_items(conn, dialect)
             await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_email ON users (email)"))
-        # create_all above built the schema as the models describe it *today*,
-        # which is head - not the baseline. Stamping baseline would leave every
-        # later revision queued to run against tables that already exist.
-        await _alembic(engine, "stamp", "head")
+        # create_all above built the missing tables as the models describe
+        # them *today*, but left the existing ones as they were. Stamping
+        # baseline would queue revisions that create tables which now exist;
+        # stamping head skipped revisions that add columns to old tables (a
+        # pre-Alembic notes table never got edited_by_user). So: stamp the
+        # last revision create_all fully covers, then upgrade - revisions
+        # after it check for what they add before adding it.
+        await _alembic(engine, "stamp", ADOPTED_AT_REVISION)
+        await _alembic(engine, "upgrade", "head")
     else:
         # Already migration-managed: apply any new revisions.
         await _alembic(engine, "upgrade", "head")
@@ -137,8 +142,12 @@ async def ensure_schema(engine: AsyncEngine) -> None:
             await _create_postgres_vector_indexes(conn)
 
 
-#: The first migration; existing databases are stamped here on adoption.
+#: The first migration.
 BASELINE_REVISION = "0001_baseline"
+#: Where an adopted pre-Alembic database is stamped before upgrading: every
+#: revision up to here only touched tables such a database did not have,
+#: which create_all has just built whole.
+ADOPTED_AT_REVISION = "0003_membership_status"
 
 
 def _has_table(sync_conn, name: str) -> bool:

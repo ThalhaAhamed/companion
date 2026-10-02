@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_org_id, get_current_user
@@ -41,7 +41,6 @@ from app.services.ask import (  # noqa: E402 - the pipeline itself lives with th
     ASK_CONTEXT_DOCUMENTS,
     ASK_CONTEXT_EXCERPTS,
     ASK_CONTEXT_NOTES,
-    ASK_NOTE_EXCERPT,
     ASK_SYSTEM_PROMPT,
     NothingToAnswerFrom,
     ask_workspace,
@@ -87,8 +86,16 @@ class NoteUpdate(BaseModel):
     move_to_root: bool = False
 
 
+class AskTurn(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(max_length=8000)
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
+    # The conversation so far, oldest first. The page reads like a chat, so
+    # people ask "who owns it now?" - without this the model never saw "it".
+    history: List[AskTurn] = Field(default_factory=list, max_length=20)
     note_ids: Optional[List[uuid.UUID]] = None
     folder_id: Optional[uuid.UUID] = None
     favorites_only: bool = False
@@ -193,7 +200,11 @@ async def _embed_note(title: str, content: str) -> Optional[List[float]]:
     Keyword search runs alongside it, so precise wording is not lost either.
 
     Failure is non-fatal: the note still saves and stays findable by text
-    search, it simply will not surface through semantic retrieval.
+    search, it simply will not surface through semantic retrieval until
+    embed_missing_notes() gives it a vector. The same goes for the hash
+    fallback used while the model cannot load: its vectors share the
+    model's width but none of its meaning, and once stored they were
+    indistinguishable from real ones and never replaced.
     """
     pieces = _note_pieces(title, content)
     if not pieces:
@@ -202,6 +213,8 @@ async def _embed_note(title: str, content: str) -> Optional[List[float]]:
         import numpy as np
 
         vectors = np.asarray(await embedding_service.embed_batch_async(pieces), dtype=np.float32)
+        if embedding_service.using_fallback:
+            return None
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         vectors = np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)
         centroid = vectors.mean(axis=0)
@@ -212,6 +225,38 @@ async def _embed_note(title: str, content: str) -> Optional[List[float]]:
     except Exception as exc:
         logger.warning(f"Could not embed note: {exc}")
         return None
+
+
+async def embed_missing_notes(limit: int = 500) -> int:
+    """
+    Give a vector to notes saved while the embedding model was unavailable.
+    Runs at startup once the model has loaded; returns how many were done.
+    """
+    from app.database.connection import get_db_context
+    from app.services.meeting_notes import _keep_timestamps
+
+    await embedding_service.warmup_async()
+    if embedding_service.using_fallback:
+        return 0
+    done = 0
+    async with get_db_context() as db:
+        missing = Note.embedding.is_(None)
+        if db.get_bind().dialect.name != "postgresql":
+            # The portable column is JSON, which stores None as the JSON
+            # literal null rather than SQL NULL.
+            missing = or_(missing, cast(Note.embedding, String) == "null")
+        notes = (await db.execute(select(Note).where(missing).limit(limit))).scalars().all()
+        for note in notes:
+            vector = await _embed_note(note.title, note.content)
+            if vector is None:
+                continue
+            note.embedding = vector
+            _keep_timestamps(note)  # a vector is not an edit
+            done += 1
+        await db.commit()
+    if done:
+        logger.info("Embedded %d note(s) saved while the embedding model was unavailable", done)
+    return done
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +483,15 @@ async def update_note(
             body.content if body.content is not None else note.content,
         )
 
+    from app.services.meeting_notes import only_ticks_changed
+
+    # What makes a meeting's note "edited" (kept on Reprocess): a change to
+    # its words, not a tick, a favourite or a move.
+    if (body.title is not None and body.title != note.title) or (
+        body.content is not None and not only_ticks_changed(note.content, body.content)
+    ):
+        fields["edited_by_user"] = True
+
     previous_content = note.content
     note = await repo.update(note, **fields)
 
@@ -539,7 +593,7 @@ async def ask_notebook(
         return await ask_workspace(
             db, org_id, body.question,
             folder_id=body.folder_id, favorites_only=body.favorites_only, note_ids=body.note_ids,
-            provider=provider,
+            provider=provider, history=[t.model_dump() for t in body.history],
         )
     except NothingToAnswerFrom:
         return {"answer": "There are no notes in scope to answer from yet.", "sources": [], "provider": provider.name}
@@ -558,6 +612,9 @@ async def _retrieve_document_passages(db: AsyncSession, org_id: uuid.UUID, quest
         return []
 
 
+KEYWORD_WEIGHT = 0.25
+
+
 async def _retrieve_relevant_notes(
     db: AsyncSession, conditions: List[Any], question: str
 ) -> List[Note]:
@@ -574,6 +631,22 @@ async def _retrieve_relevant_notes(
     notes: Dict[uuid.UUID, Note] = {}
     pool = ASK_CONTEXT_NOTES * 3
 
+    # A question naming a day ("what happened on September 20?") is about the
+    # meeting held that day, which neither ranking knows: measured on a
+    # 69-note workspace it ranked 31st by meaning and 38th by keyword and
+    # never reached the model. Meeting notes are titled "YYYY-MM-DD · ...",
+    # so the day's notes are found by title on every database and go first.
+    from app.rag.meeting_memory import _extract_date_hint
+
+    day = _extract_date_hint(question, datetime.now(timezone.utc).date())
+    if day is not None:
+        held = await db.execute(
+            select(Note).where(*conditions, Note.title.like(f"{day.isoformat()}%")).limit(ASK_CONTEXT_NOTES)
+        )
+        for note in held.scalars().all():
+            notes[note.id] = note
+            ranked[note.id] = 1.0  # above any fused score (those are < 0.05)
+
     def fuse(results, weight: float) -> None:
         for rank, (note, _score) in enumerate(results, start=1):
             notes[note.id] = note
@@ -586,13 +659,19 @@ async def _retrieve_relevant_notes(
     except Exception as exc:
         logger.warning(f"Semantic note retrieval unavailable: {exc}")
 
-    fuse(await backend.keyword_search(Note, conditions, question, limit=pool), 1.0)
+    # Keyword evidence counts for a quarter of semantic evidence. At equal
+    # weight the substring ranker pulled the right note down: on a 69-note
+    # benchmark top-1 went from 0.50 (meaning alone) to 0.38 fused; at 0.25
+    # it is 0.62 and MRR 0.74 - better than either ranker alone.
+    fuse(await backend.keyword_search(Note, conditions, question, limit=pool), KEYWORD_WEIGHT)
 
     ordered = sorted(ranked, key=lambda note_id: -ranked[note_id])
     return [notes[note_id] for note_id in ordered[:ASK_CONTEXT_NOTES]]
 
 
-async def _retrieve_meeting_excerpts(db: AsyncSession, org_id: uuid.UUID, question: str) -> List[Dict[str, Any]]:
+async def _retrieve_meeting_excerpts(
+    db: AsyncSession, org_id: uuid.UUID, question: str, meeting_id: Optional[uuid.UUID] = None, limit: int = ASK_CONTEXT_EXCERPTS,
+) -> List[Dict[str, Any]]:
     """
     Passages from the chunk-level meeting index - transcript chunks and
     extracted memories. These are embedded at the size the model actually
@@ -601,12 +680,15 @@ async def _retrieve_meeting_excerpts(db: AsyncSession, org_id: uuid.UUID, questi
     try:
         from app.rag.meeting_memory import meeting_memory_rag
 
-        hits = await meeting_memory_rag.search(db, org_id, question, limit=ASK_CONTEXT_EXCERPTS, min_similarity=0.35)
+        hits = await meeting_memory_rag.search(
+            db, org_id, question, meeting_id=meeting_id, limit=limit, min_similarity=0.0 if meeting_id else 0.35
+        )
     except Exception as exc:
         logger.warning(f"Meeting excerpt retrieval unavailable: {exc}")
         return []
     return [
         {
+            "meeting_id": str(hit.meeting_id) if hit.meeting_id else None,
             "meeting_title": hit.meeting_title or "Untitled meeting",
             "meeting_date": hit.meeting_date,
             "speaker": hit.speaker,

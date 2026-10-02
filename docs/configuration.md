@@ -16,6 +16,7 @@ Everything is configurable from **Settings** in the app. Precedence is:
 | `LLM_MODEL` | per provider | Model name |
 | `LLM_API_KEY` | — | Hosted providers only |
 | `LLM_BASE_URL` | per provider | Proxies, gateways, self-hosted endpoints |
+| `OLLAMA_NUM_CTX` | `16384` (`32768` for larger prompts) | Context window requested from Ollama. Its own default (2048 on Ollama 0.35) silently cuts long prompts from the start; lower this only if the model runs out of memory |
 | `MEETSTREAM_API_KEY` | — | Deployment-wide key; each member can also add their own in Settings |
 | `MEETSTREAM_WEBHOOK_SECRET` | — | Signature check for webhook deliveries (also settable in Settings) |
 | `MCP_SERVER_URL` | `http://localhost:8000/mcp` | Public URL MeetStream uses to reach this server. Also settable in Settings → Meetings → Public address; the environment variable wins |

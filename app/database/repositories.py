@@ -1,6 +1,8 @@
 """
 Data access repositories with strict organization isolation.
 """
+import difflib
+import re
 import uuid
 from datetime import datetime, timezone, date
 from typing import Optional, List, Dict, Any, Tuple
@@ -85,17 +87,15 @@ class MeetingRepository:
 
     async def clear_extraction(self, meeting_id: uuid.UUID) -> None:
         """
-        Drop everything derived from a meeting's transcript - memories, action
-        items, embeddings, summary - so extraction can run again without
-        duplicating results. The transcript itself and its participants stay.
+        Drop the memories and embeddings derived from a meeting's transcript
+        so extraction can run again without duplicating them. Action items
+        are not dropped here: ActionItemRepository.replace_extracted matches
+        them against the new run. The pipeline calls this in the same
+        transaction that stores the new results, so a run that fails leaves
+        the previous ones in place rather than an empty meeting.
         """
-        from app.models.database import ActionItem, MeetingMemoryEmbedding, Memory
-
-        for model in (ActionItem, Memory, MeetingMemoryEmbedding):
+        for model in (Memory, MeetingMemoryEmbedding):
             await self.session.execute(delete(model).where(model.meeting_id == meeting_id))
-        await self.session.execute(
-            update(Meeting).where(Meeting.id == meeting_id).values(summary=None, processing_error=None)
-        )
         await self.session.flush()
 
     async def get_all_existing_bot_ids(self) -> set:
@@ -521,6 +521,61 @@ class ActionItemRepository:
         self.session.add(action)
         await self.session.flush()
         return action
+
+    async def replace_extracted(
+        self, org_id: uuid.UUID, meeting_id: uuid.UUID, extracted: List[Dict[str, Any]], parse_due=None
+    ) -> List[ActionItem]:
+        """
+        Swap a meeting's extracted tasks for a fresh extraction's.
+
+        Reprocess used to delete every task on the meeting and create new
+        ones, which lost the tasks people had written in the note, lost every
+        tick, and left the note's checkboxes pointing at rows that no longer
+        existed. Now a task the new run finds again keeps its row (id, status,
+        notes), a task written by hand is never touched, and an old task
+        nobody acted on that the new run does not find is dropped. One that
+        was completed or otherwise moved on is kept as a record of the work.
+        """
+        def key(text: str) -> str:
+            return " ".join(re.sub(r"[^\w\s]", " ", (text or "").lower()).split())
+
+        old = (
+            await self.session.execute(
+                select(ActionItem)
+                .where(ActionItem.meeting_id == meeting_id, ActionItem.note_id.is_(None))
+                .order_by(ActionItem.created_at)
+            )
+        ).scalars().all()
+        unmatched = list(old)
+        kept: List[ActionItem] = []
+        for data in extracted:
+            task = str(data.get("task") or "").strip()
+            if not task:
+                continue
+            due = parse_due(data.get("due_date")) if parse_due else data.get("due_date")
+            best, best_score = None, 0.0
+            for item in unmatched:
+                score = difflib.SequenceMatcher(None, key(item.task), key(task)).ratio()
+                if score > best_score:
+                    best, best_score = item, score
+            if best is not None and best_score >= 0.8:
+                unmatched.remove(best)
+                best.task = task
+                # A run that found no owner or date does not erase one.
+                best.owner = data.get("owner") or best.owner
+                best.due_date = due or best.due_date
+                best.priority = data.get("priority") or best.priority
+                kept.append(best)
+            else:
+                kept.append(await self.create(
+                    org_id=org_id, meeting_id=meeting_id, task=task, owner=data.get("owner"),
+                    priority=data.get("priority") or "medium", due_date=due,
+                ))
+        for item in unmatched:
+            if item.status == "open":
+                await self.session.delete(item)
+        await self.session.flush()
+        return kept
 
     async def list_action_items(
         self,

@@ -120,9 +120,15 @@ async def _launch(authed_client, monkeypatch):
         assert transcript_id == "tr-123"
         return _TRANSCRIPT
 
+    async def send_bot_message(self, bot_id, text, api_key=None):
+        # bot.inmeeting posts the introduction; unmocked, it went to the real
+        # api.meetstream.ai with the test key and came back 403.
+        return {"status": "sent"}
+
     # The class, not the shared instance: undoing an instance patch leaves a
     # bound method in the instance's __dict__ that shadows later class patches.
     monkeypatch.setattr(type(agent_api.meetstream_client), "list_mia_agents", list_mia_agents)
+    monkeypatch.setattr(type(agent_api.meetstream_client), "send_bot_message", send_bot_message)
     monkeypatch.setattr(meetings_api.meetstream_client, "create_bot", create_bot)
     monkeypatch.setattr("app.services.processing.processing_pipeline.meetstream_client.get_transcript", get_transcript)
     monkeypatch.setattr("app.services.memory.try_get_llm_provider", lambda workspace=None: None)  # rule-based extraction
@@ -240,3 +246,37 @@ async def test_concurrent_identical_deliveries_never_answer_500(authed_client, m
     assert codes == [200] * 6, codes
     statuses = sorted(r.json()["status"] for r in responses)
     assert statuses.count("accepted") == 1 and statuses.count("ignored") == 5, statuses
+
+
+@pytest.mark.asyncio
+async def test_a_late_event_never_moves_a_meeting_backwards(authed_client, monkeypatch):
+    """
+    Deliveries arrive out of order: a bot.inmeeting retried after the call
+    had been processed moved the completed meeting back to "in the call" and
+    reset the time it started.
+    """
+    meeting = await _launch(authed_client, monkeypatch)
+    mid, bot = meeting["id"], meeting["meetstream_bot_id"]
+    for event in ("bot.inmeeting", "bot.stopped", "transcription.processed", "bot.done"):
+        assert (await authed_client.post("/api/webhooks/meetstream", json=_event(bot, event))).json()["status"] == "accepted"
+    done = (await authed_client.get(f"/api/meetings/{mid}")).json()
+    assert done["status"] == "completed"
+
+    for event in ("bot.inmeeting", "bot.joining", "bot.stopped"):
+        late = {"bot_id": bot, "bot_event": event, "timestamp": "2026-09-15T02:59:00+00:00"}
+        assert (await authed_client.post("/api/webhooks/meetstream", json=late)).status_code == 200
+    after = (await authed_client.get(f"/api/meetings/{mid}")).json()
+    assert (after["status"], after["started_at"], after["ended_at"]) == (done["status"], done["started_at"], done["ended_at"])
+
+
+@pytest.mark.asyncio
+async def test_a_retried_delivery_without_a_timestamp_is_a_duplicate(authed_client, monkeypatch):
+    """With no timestamp the key used the time it arrived, so each retry was stored as a new event."""
+    meeting = await _launch(authed_client, monkeypatch)
+    body = {"bot_id": meeting["meetstream_bot_id"], "bot_event": "bot.inmeeting"}
+    first = (await authed_client.post("/api/webhooks/meetstream", json=body)).json()
+    again = (await authed_client.post("/api/webhooks/meetstream", json=body)).json()
+    assert first["status"] == "accepted"
+    assert again["status"] == "ignored" and again["reason"].startswith("duplicate")
+    other = {**body, "bot_event": "bot.recording"}
+    assert (await authed_client.post("/api/webhooks/meetstream", json=other)).json()["status"] == "accepted"

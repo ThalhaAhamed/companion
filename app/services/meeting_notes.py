@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from sqlalchemy import select
@@ -85,6 +85,22 @@ def note_tags(meeting: Meeting) -> List[str]:
     return tags
 
 
+def task_line(item: ActionItem) -> str:
+    """One action item as a Markdown checkbox carrying its marker."""
+    box = "x" if item.status == "completed" else " "
+    detail = item.task.strip()
+    if item.owner:
+        detail = f"**{item.owner}** — {detail}"
+    extras = []
+    if item.due_date:
+        extras.append(f"due {item.due_date.isoformat()}")
+    if item.priority and item.priority != "medium":
+        extras.append(item.priority)
+    if extras:
+        detail += f" _({', '.join(extras)})_"
+    return f"- [{box}] {detail} {TASK_MARKER.format(id=item.id)}"
+
+
 def render_note(
     meeting: Meeting,
     participants: Iterable[Participant],
@@ -114,19 +130,7 @@ def render_note(
     actions = list(action_items)
     if actions:
         lines.extend(["## Action items", ""])
-        for item in actions:
-            box = "x" if item.status == "completed" else " "
-            detail = item.task.strip()
-            if item.owner:
-                detail = f"**{item.owner}** — {detail}"
-            extras = []
-            if item.due_date:
-                extras.append(f"due {item.due_date.isoformat()}")
-            if item.priority and item.priority != "medium":
-                extras.append(item.priority)
-            if extras:
-                detail += f" _({', '.join(extras)})_"
-            lines.append(f"- [{box}] {detail} {TASK_MARKER.format(id=item.id)}")
+        lines.extend(task_line(item) for item in actions)
         lines.append("")
 
     by_type: Dict[MemoryType, List[Memory]] = {}
@@ -152,10 +156,40 @@ def render_note(
 
 
 def was_edited_by_user(note: Note) -> bool:
-    """A generated note never touches updated_at after creation; a person does."""
-    if not note.created_at or not note.updated_at:
-        return False
-    return note.updated_at - note.created_at > timedelta(seconds=2)
+    """
+    Set when a person changes the note's title or text (see update_note).
+    It used to be inferred from updated_at being two seconds past
+    created_at, which missed a quick edit - Reprocess then wrote over it -
+    and counted favouriting or moving the note as one.
+    """
+    return bool(note.edited_by_user)
+
+
+_TICKED = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)\[[xX]\]")
+
+
+def only_ticks_changed(before: str, after: str) -> bool:
+    """True when two versions of a note differ in checkbox states alone."""
+    def unticked(text: str) -> List[str]:
+        return [_TICKED.sub(r"\1[ ]", line).rstrip() for line in (text or "").strip().split("\n")]
+
+    return unticked(before) == unticked(after)
+
+
+def _naive_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """SQLite hands back naive UTC datetimes, Postgres aware ones."""
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+
+
+def _keep_timestamps(note: Note) -> None:
+    """A change made for the person, not by them: updated_at stays put."""
+    stamp = note.updated_at
+    # Re-assigning the same value is not a change to SQLAlchemy, so the
+    # column's onupdate would still fire; flagging it keeps the stamp.
+    note.updated_at = stamp
+    flag_modified(note, "updated_at")
 
 
 class MeetingNoteService:
@@ -187,7 +221,8 @@ class MeetingNoteService:
         Create or refresh the note for one meeting.
 
         Returns the note, or None when the meeting has nothing to write yet
-        or its note has been edited by hand.
+        or its note has been edited by hand - then only the note's task lines
+        are brought up to date (see _refresh_task_lines).
         """
         if not meeting.summary and meeting.processing_status != "completed":
             return None
@@ -195,7 +230,13 @@ class MeetingNoteService:
         existing = (
             await self.session.execute(select(Note).where(Note.meeting_id == meeting.id))
         ).scalars().first()
+        actions = (
+            await self.session.execute(
+                select(ActionItem).where(ActionItem.meeting_id == meeting.id).order_by(ActionItem.created_at)
+            )
+        ).scalars().all()
         if existing is not None and was_edited_by_user(existing):
+            await self._refresh_task_lines(existing, actions, embed)
             return None
 
         participants = (
@@ -203,11 +244,6 @@ class MeetingNoteService:
         ).scalars().all()
         memories = (
             await self.session.execute(select(Memory).where(Memory.meeting_id == meeting.id))
-        ).scalars().all()
-        actions = (
-            await self.session.execute(
-                select(ActionItem).where(ActionItem.meeting_id == meeting.id).order_by(ActionItem.created_at)
-            )
         ).scalars().all()
 
         title = note_title(meeting)
@@ -229,13 +265,80 @@ class MeetingNoteService:
         existing.content = content
         existing.tags = note_tags(meeting)
         existing.embedding = embedding
-        # Keep created/updated equal so the "edited by a person" check stays
-        # meaningful after a regeneration.
         stamp = datetime.now(timezone.utc)
         existing.created_at = stamp
         existing.updated_at = stamp
         await self.session.flush()
         return existing
+
+    async def _refresh_task_lines(self, note: Note, actions: Sequence[ActionItem], embed=None) -> None:
+        """
+        Keep a hand-edited note's checkboxes in step with the meeting's tasks.
+
+        Reprocess left an edited note alone entirely, so its checkboxes went
+        on pointing at tasks that had been replaced and the new tasks never
+        appeared in it. The person's text stays as it is; only task lines
+        change: one whose task no longer exists is removed, a task created
+        since their last edit gets a line, and every box shows its task's
+        state. A task that is older than the edit and has no line was taken
+        out on purpose, and stays out.
+        """
+        content = note.content or ""
+        marked = set(task_states(content))
+        live = set()
+        if marked:
+            live = set((await self.session.execute(
+                select(ActionItem.id).where(
+                    ActionItem.organization_id == note.organization_id, ActionItem.id.in_(list(marked))
+                )
+            )).scalars().all())
+
+        lines: List[str] = []
+        for line in content.split("\n"):
+            match = TASK_LINE.match(line)
+            if match and uuid.UUID(match.group(4)) not in live:
+                continue
+            lines.append(line)
+
+        ours = {item.id for item in actions}
+        edited_at = _naive_utc(note.updated_at)
+        missing = [
+            task_line(item) for item in actions
+            if item.id not in marked and (edited_at is None or _naive_utc(item.created_at) > edited_at)
+        ]
+        if missing:
+            last_ours = [
+                index for index, line in enumerate(lines)
+                if (match := TASK_LINE.match(line)) and uuid.UUID(match.group(4)) in ours
+            ]
+            heading = next((i for i, line in enumerate(lines) if line.strip().lower() == "## action items"), None)
+            footer = next(
+                (i for i, line in enumerate(lines)
+                 if line.strip() == "---" and i + 1 < len(lines) and lines[i + 1].startswith("_Generated from the meeting record")),
+                None,
+            )
+            if last_ours:
+                lines[last_ours[-1] + 1:last_ours[-1] + 1] = missing
+            elif heading is not None:
+                at = heading + 1
+                if at < len(lines) and not lines[at].strip():
+                    at += 1
+                lines[at:at] = missing
+            elif footer is not None:
+                lines[footer:footer] = ["## Action items", "", *missing, ""]
+            else:
+                lines.extend(["", "## Action items", "", *missing])
+
+        text = "\n".join(lines)
+        for item in actions:
+            text = set_task_state(text, item.id, item.status == "completed")
+        if text == content:
+            return
+        note.content = text
+        if embed:
+            note.embedding = await embed(note.title, text)
+        _keep_timestamps(note)
+        await self.session.flush()
 
     async def sync_all(self, org_id: uuid.UUID, embed=None) -> Dict[str, int]:
         """Backfill: one note per completed meeting that does not have one yet."""
@@ -306,30 +409,41 @@ async def apply_note_tasks_to_action_items(session: AsyncSession, note: Note, pr
         done = changed[item.id]
         item.status = "completed" if done else "open"
         item.completed_at = datetime.now(timezone.utc) if done else None
+        # The same task line copied into another note ticked the task but
+        # left the meeting's own note unticked; every copy follows now.
+        await apply_action_item_to_notes(session, item, skip_note_id=note.id)
     await session.flush()
     return len(items)
 
 
-async def apply_action_item_to_notes(session: AsyncSession, item: ActionItem) -> int:
+async def apply_action_item_to_notes(
+    session: AsyncSession, item: ActionItem, skip_note_id: Optional[uuid.UUID] = None
+) -> int:
     """
     An action item completed (or reopened) elsewhere ticks its checkbox in
-    the meeting's note. The note's timestamps are preserved so this does not
-    count as a person editing it.
+    every note of the workspace that carries its marker - the meeting's note,
+    the note it was written in, or one it was copied into. The notes'
+    timestamps are preserved so this does not count as a person editing them.
+
+    Notes used to be found by meeting id alone: a task from no meeting
+    matched every meeting-less note in every workspace, and a task line
+    copied into another note was never updated.
     """
+    marker = f"action:{item.id}"
     notes = (
-        await session.execute(select(Note).where(Note.meeting_id == item.meeting_id))
+        await session.execute(
+            select(Note).where(Note.organization_id == item.organization_id, Note.content.contains(marker))
+        )
     ).scalars().all()
     touched = 0
     for note in notes:
+        if note.id == skip_note_id:
+            continue
         updated = set_task_state(note.content, item.id, item.status == "completed")
         if updated == note.content:
             continue
-        stamp = note.updated_at
         note.content = updated
-        # Re-assigning the same value is not a change to SQLAlchemy, so the
-        # column's onupdate would still fire; flagging it keeps the stamp.
-        note.updated_at = stamp
-        flag_modified(note, "updated_at")
+        _keep_timestamps(note)
         touched += 1
     await session.flush()
     return touched
@@ -340,6 +454,9 @@ async def apply_action_item_to_notes(session: AsyncSession, item: ActionItem) ->
 # ---------------------------------------------------------------------------
 
 PLAIN_TASK_LINE = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)\[( |x|X)\]\s+(.+?)\s*$")
+LIST_ITEM = re.compile(r"^\s{0,3}(?:[-*+]|\d+[.)])\s")
+#: A code fence: three or more backticks or tildes, indented at most three spaces.
+FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 OWNER_PREFIX = re.compile(r"^\*\*(.+?)\*\*\s*[—:-]\s*(.+)$")
 
 
@@ -357,17 +474,51 @@ async def adopt_handwritten_tasks(session: AsyncSession, note: Note) -> Optional
     line gets its marker so the two stay linked from then on.
 
     Returns the rewritten note text, or None when nothing needed adopting.
-    Lines inside fenced code blocks are left alone.
+    Lines inside code - fenced with ``` or ~~~, or indented four spaces
+    after a paragraph - are left alone; only ``` fences used to be
+    recognised, so example checkboxes became real tasks.
     """
     lines = (note.content or "").split("\n")
     out: List[str] = []
-    in_code = False
+    fence: Optional[str] = None
+    in_list = False
+    in_code_block = False
+    previous_blank = True
     changed = False
 
     for line in lines:
-        if line.strip().startswith("```"):
-            in_code = not in_code
-        if in_code or TASK_LINE.match(line):
+        stripped = line.strip()
+        opener = FENCE.match(line)
+        if fence is None and opener:
+            fence = opener.group(1)
+            out.append(line)
+            continue
+        if fence is not None:
+            if stripped.startswith(fence[0] * len(fence)) and not stripped.strip(fence[0]):
+                fence = None
+            out.append(line)
+            continue
+
+        indented = line.startswith(("    ", "\t"))
+        if stripped:
+            # Four spaces after a blank line is code, unless it continues a
+            # list - a nested task under a task is still a task.
+            if indented and (in_code_block or (previous_blank and not in_list)):
+                in_code_block = True
+            else:
+                in_code_block = False
+                if not indented:
+                    in_list = bool(LIST_ITEM.match(line))
+            previous_blank = False
+            if in_code_block:
+                out.append(line)
+                continue
+        else:
+            previous_blank = True
+            out.append(line)
+            continue
+
+        if TASK_LINE.match(line):
             out.append(line)
             continue
         match = PLAIN_TASK_LINE.match(line)

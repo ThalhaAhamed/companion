@@ -305,3 +305,35 @@ def test_xai_is_distinct_from_groq_with_its_own_base_url():
     assert isinstance(groq, GroqProvider) and groq.default_base_url == "https://api.groq.com/openai/v1"
     described = {d["name"]: d for d in describe_providers()}
     assert "console.x.ai" in described["xai"]["fields"][0]["help"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_is_not_json_is_a_provider_error(httpx_mock):
+    """
+    A 200 carrying an HTML page - a proxy's error page, or a base URL that
+    points at a website - escaped as JSONDecodeError and failed the meeting
+    instead of taking the rule-based fallback.
+    """
+    httpx_mock.add_response(url="http://localhost:11434/api/chat", content=b"<html>proxy error</html>",
+                            headers={"content-type": "text/html"})
+    provider = create_llm_provider(LLMConfig(provider="ollama", model="m"))
+    with pytest.raises(LLMError, match="not JSON"):
+        await provider.complete([ChatMessage(role="user", content="hi")])
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_refuses_json_mode_is_asked_again_without_it(httpx_mock):
+    """
+    LM Studio, older vLLM and llama.cpp builds reject response_format; every
+    meeting on them went to the rule-based fallback after a single 400.
+    """
+    import json
+
+    url = "http://localhost:1234/v1/chat/completions"
+    httpx_mock.add_response(url=url, status_code=400, json={"error": "'response_format.type' must be 'json_schema'"})
+    httpx_mock.add_response(url=url, json={"choices": [{"message": {"content": 'Here it is: {"summary": "ok"}'}}]})
+    provider = create_llm_provider(LLMConfig(provider="openai_compatible", model="m", base_url="http://localhost:1234/v1"))
+
+    assert await provider.complete_json([ChatMessage(role="user", content="extract")]) == {"summary": "ok"}
+    first, second = (json.loads(r.content) for r in httpx_mock.get_requests())
+    assert "response_format" in first and "response_format" not in second

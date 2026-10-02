@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from sqlalchemy import (
     String, Text, Boolean, Integer, Float, Date, DateTime,
-    ForeignKey, Enum as SQLEnum, Index, UniqueConstraint
+    ForeignKey, Enum as SQLEnum, Index, UniqueConstraint, false
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from app.config import settings
@@ -372,6 +372,9 @@ class Note(Base):
     note_type: Mapped[str] = mapped_column(String(50), default="note")  # note, meeting, idea, research
     tags: Mapped[List[str]] = mapped_column(JSONDocument, default=list)
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    # A person changed the title or text (ticking a checkbox does not count).
+    # A meeting's note is regenerated on Reprocess only while this is false.
+    edited_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     embedding: Mapped[Optional[List[float]]] = mapped_column(Embedding(settings.EMBEDDING_DIMENSION), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

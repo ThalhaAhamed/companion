@@ -837,6 +837,12 @@ async def _tool_update_action_item(
     action = await action_repo.update(org_id, action_id, ActionItemUpdate(**update_fields))
     if not action:
         return {"error": "Action item not found"}
+    if "status" in update_fields:
+        # Same as the dashboard: a task completed from the call is ticked in
+        # its notes too, rather than left open there.
+        from app.services.meeting_notes import apply_action_item_to_notes
+
+        await apply_action_item_to_notes(db, action)
 
     await db.commit()
 

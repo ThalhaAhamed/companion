@@ -512,8 +512,10 @@ async def reprocess_meeting(
     """
     Run extraction again - after a failure, a provider change, or an
     improved prompt. Uses the transcript already stored, or fetches it from
-    MeetStream if only a transcript id is known. Previous memories and
-    action items for the meeting are replaced.
+    MeetStream if only a transcript id is known. The previous memories are
+    replaced and the extracted action items matched against the new run
+    (see ActionItemRepository.replace_extracted); nothing is removed until
+    the new run has succeeded.
     """
     meeting_repo = MeetingRepository(db)
     meeting = await meeting_repo.get_by_id(org_id, meeting_id)
@@ -529,8 +531,8 @@ async def reprocess_meeting(
     if not segments and not meeting.meetstream_transcript_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This meeting has no transcript to process.")
 
-    await meeting_repo.clear_extraction(meeting.id)
-    await meeting_repo.update_status(meeting.id, processing_status="queued_for_processing", processing_error=None)
+    queued = await meeting_repo.update_status(meeting.id, processing_status="queued_for_processing")
+    queued.processing_error = None  # update_status reads None as "leave as is"
     await db.commit()
     await db.refresh(meeting)
 

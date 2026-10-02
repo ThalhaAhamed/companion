@@ -102,4 +102,4 @@ def _raise_for_status(response: httpx.Response, label: str) -> None:
     detail = response.text.strip()
     if len(detail) > 500:
         detail = f"{detail[:500]}…"
-    raise LLMError(f"{label} request failed ({response.status_code}): {detail}")
+    raise LLMError(f"{label} request failed ({response.status_code}): {detail}", status_code=response.status_code)

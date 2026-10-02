@@ -5,6 +5,7 @@ and meeting summaries from raw meeting transcripts.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,10 @@ TRANSCRIPT_CLOSE = "<<<END TRANSCRIPT>>>"
 #: every hosted model's window and the common 8k-16k local defaults once the
 #: prompt and the reply are accounted for.
 MAX_SINGLE_PASS_CHARS = 48_000
+
+#: Seconds to wait before each retry of a transient provider failure (see
+#: LLMError.transient). Short: a model loading onto the GPU, or a rate limit.
+RETRY_DELAYS = (3.0, 10.0)
 
 EXTRACTION_SYSTEM_PROMPT = f"""You are an expert AI meeting analyst. Your job is to extract high-value persistent knowledge and structured action items from the provided meeting transcript.
 
@@ -140,12 +145,21 @@ def _dedupe(items) -> List[Dict[str, Any]]:
     return kept
 
 
+_MEMORY_TYPES = {member.value for member in MemoryType}
+
+
 def sanitize_extraction(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Keep every well-formed memory and action item; drop the rest quietly."""
     memories: List[Dict[str, Any]] = []
     for item in raw.get("memories") or []:
         if not isinstance(item, dict):
             continue
+        if isinstance(item.get("type"), str) and item["type"].strip().lower() not in _MEMORY_TYPES:
+            # A category of the model's own ("insight") still names something
+            # that was said; it is kept as a fact rather than thrown away.
+            item = {**item, "type": MemoryType.FACT.value}
+        elif isinstance(item.get("type"), str):
+            item = {**item, "type": item["type"].strip().lower()}
         try:
             memories.append(ExtractedMemory(**item).model_dump(mode="json"))
         except ValidationError:
@@ -208,7 +222,8 @@ class MemoryExtractionService:
         # unified them (see services.llm.workspace_llm); None = this install's.
         provider = try_get_llm_provider(workspace_llm)
         ai_error = "No AI provider is configured."
-        if provider is not None:
+        attempt = 0
+        while provider is not None:
             try:
                 result = await self._extract_with_provider(
                     provider, transcript_text, meeting_title, customer_name, project_name, meeting_date
@@ -216,6 +231,11 @@ class MemoryExtractionService:
                 result["ai_used"] = True
                 return result
             except (LLMError, OSError) as exc:
+                if getattr(exc, "transient", False) and attempt < len(RETRY_DELAYS):
+                    logger.info(f"Memory extraction via {provider.label} failed ({exc}); retrying.")
+                    await asyncio.sleep(RETRY_DELAYS[attempt])
+                    attempt += 1
+                    continue
                 logger.warning(f"Memory extraction via {provider.label} failed: {exc}. "
                     "Falling back to rule-based parser."
                 )
@@ -223,6 +243,7 @@ class MemoryExtractionService:
                 # saw for an Ollama that answered fine but ran out of GPU
                 # memory loading the model.
                 ai_error = f"{provider.label}: {str(exc).strip() or exc.__class__.__name__}"
+                break
 
         result = self._heuristic_extract(transcript_text, meeting_title, customer_name, project_name)
         result["ai_used"] = False
@@ -246,6 +267,12 @@ class MemoryExtractionService:
                 ),
             ]
             results.append(sanitize_extraction(await provider.complete_json(messages)))
+
+        if not any(r["summary"] or r["memories"] or r["action_items"] for r in results):
+            # Valid JSON in the wrong shape - {}, a string where a list
+            # belongs, every item malformed - used to "complete" the meeting
+            # with no summary, memories or tasks and no word of why.
+            raise LLMError(f"{provider.label} replied without a summary, memories or action items in the expected format.")
 
         if len(results) == 1:
             return results[0]

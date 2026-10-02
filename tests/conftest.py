@@ -21,6 +21,16 @@ os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL") or f"sqlite+aio
 # supplies real-looking ones so nothing is written next to a developer's data.
 os.environ.setdefault("SESSION_SECRET", "test-session-secret-not-for-production-0123456789")
 os.environ.setdefault("MCP_AUTH_TOKEN", "test-mcp-token-not-for-production-0123456789")
+# A developer's .env holds real provider and MeetStream keys; read, they sent
+# the suite's meetings to a hosted model and its bots to api.meetstream.ai,
+# billed. The suite runs on what it sets itself.
+os.environ["MEET_COMPANION_NO_DOTENV"] = "1"
+for _name in (
+    "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL",
+    "OPENAI_API_KEY", "GROQ_API_KEY", "XAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+    "MEETSTREAM_API_KEY", "MEETSTREAM_WEBHOOK_SECRET", "MEETSTREAM_AGENT_CONFIG_ID",
+):
+    os.environ.pop(_name, None)
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402

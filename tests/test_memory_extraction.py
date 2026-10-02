@@ -70,9 +70,13 @@ def test_malformed_model_output_is_dropped_not_fatal():
         ],
     })
     assert cleaned["summary"] == "Short."
-    assert [m["type"] for m in cleaned["memories"]] == ["decision", "fact"]
+    # A category of the model's own still names something that was said: it
+    # is kept, as a fact.
+    assert [(m["type"], m["content"]) for m in cleaned["memories"]] == [
+        ("decision", "Ship Friday"), ("fact", "invented category"), ("fact", "Importance out of range"),
+    ]
     assert cleaned["memories"][0]["importance"] == 9
-    assert cleaned["memories"][1]["importance"] == 10
+    assert cleaned["memories"][2]["importance"] == 10
     assert cleaned["action_items"] == [{"task": "Send report", "owner": None, "due_date": None, "priority": "medium"}]
 
 
@@ -125,3 +129,64 @@ async def test_fallback_keeps_the_providers_actual_error(monkeypatch):
     monkeypatch.setattr("app.services.memory.try_get_llm_provider", lambda workspace=None: None)
     result = await service.extract_memories(transcript_text="A: we ship on Friday.", meeting_title="t")
     assert result["ai_error"] == "No AI provider is configured."
+
+
+class _Scripted:
+    """A provider whose complete_json() plays back a script of replies or errors."""
+    label = "Ollama (local)"
+
+    def __init__(self, *script):
+        self.script = list(script)
+        self.calls = 0
+
+    async def complete_json(self, messages, **kwargs):
+        self.calls += 1
+        step = self.script[min(self.calls, len(self.script)) - 1]
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+VALID = {"summary": "Launch set.", "memories": [{"type": "decision", "content": "Ship on Friday."}],
+         "action_items": [{"task": "Prepare the checklist", "owner": "Daniel"}]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [
+    {},
+    {"summary": 42, "memories": "none", "action_items": {"task": "x"}},
+    {"summary": None, "memories": [{"type": None, "content": None}], "action_items": [{"task": None}]},
+])
+async def test_json_in_the_wrong_shape_falls_back_instead_of_an_empty_meeting(monkeypatch, reply):
+    """
+    Valid JSON with nothing usable in it "completed" the meeting with no
+    summary, no memories, no tasks and no error.
+    """
+    provider = _Scripted(reply)
+    monkeypatch.setattr("app.services.memory.try_get_llm_provider", lambda workspace=None: provider)
+    result = await MemoryExtractionService().extract_memories("Daniel: I will prepare the checklist.", meeting_title="t")
+    assert result["ai_used"] is False
+    assert "expected format" in result["ai_error"]
+    assert result["action_items"]  # the rule-based fallback ran
+
+
+@pytest.mark.asyncio
+async def test_a_model_still_loading_is_retried_not_given_up_on(monkeypatch):
+    """
+    Ollama answers 500 for a few seconds while a model loads onto the GPU;
+    the first meetings after a cold start stayed on the rule-based fallback.
+    """
+    from app.providers.llm.base import LLMError
+    from app.services import memory
+
+    monkeypatch.setattr(memory, "RETRY_DELAYS", (0, 0))
+    cold = _Scripted(LLMError("loading (500)", status_code=500), LLMError("busy (429)", status_code=429), VALID)
+    monkeypatch.setattr("app.services.memory.try_get_llm_provider", lambda workspace=None: cold)
+    result = await MemoryExtractionService().extract_memories("A: ship Friday.", meeting_title="t")
+    assert result["ai_used"] is True and cold.calls == 3
+
+    for error in (LLMError("bad key (401)", status_code=401), LLMError("Could not reach it", transient=False)):
+        broken = _Scripted(error, VALID)
+        monkeypatch.setattr("app.services.memory.try_get_llm_provider", lambda workspace=None: broken)
+        result = await MemoryExtractionService().extract_memories("A: ship Friday.", meeting_title="t")
+        assert result["ai_used"] is False and broken.calls == 1  # not worth a retry

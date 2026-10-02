@@ -402,3 +402,15 @@ async def test_switching_to_a_database_that_has_accounts_adds_nothing(authed_cli
         assert (await authed_client.get("/api/auth/check")).json() == {"authenticated": False}
     finally:
         await switch_database(old_url)
+
+
+def test_the_suite_does_not_read_the_developers_env_file():
+    """
+    A developer's .env holds real provider and MeetStream keys; read by the
+    suite, they sent test meetings to a hosted model and test bots to
+    api.meetstream.ai, billed to that developer.
+    """
+    from app.config import settings
+
+    assert settings.model_config.get("env_file") is None
+    assert not (settings.GROQ_API_KEY or settings.OPENAI_API_KEY or settings.MEETSTREAM_API_KEY or settings.LLM_API_KEY)

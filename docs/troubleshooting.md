@@ -16,6 +16,16 @@ reason. For Ollama, `Model 'x' is not pulled` means `ollama pull x`; a CUDA
 *out of memory* means the GPU is full - close other GPU work or pick a
 smaller model. Fix the provider in Settings, then *Reprocess*.
 
+**What does *Reprocess* keep?** Your work. Tasks you ticked stay ticked,
+tasks you wrote in the note stay, and a note you edited keeps your text - only
+its task lines are brought up to date (a task the new run no longer finds is
+dropped unless you had completed it). A note you never edited is regenerated.
+If the run fails, the previous results stay as they were.
+
+**"…its notebook note could not be written"** on a meeting. Processing
+finished but saving the note failed (the reason is in brackets); the meeting's
+memories and tasks are there. *Reprocess* writes the note again.
+
 **Ask AI answers "Could not answer that".** Same cause as above; the error
 text is the provider's. *Test connection* in Settings → AI provider reproduces
 it without a meeting.

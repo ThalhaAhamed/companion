@@ -113,7 +113,12 @@ async def handle_meetstream_webhook(
     # than stored - otherwise anyone could fill the events table.
     if not secret and not await MeetingRepository(db).get_by_bot_id(bot_id):
         return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "ignored", "reason": "unknown_bot"})
-    event_timestamp = payload_dict.get("timestamp") or x_meetstream_timestamp or datetime.now(timezone.utc).isoformat()
+    # A delivery with no timestamp is keyed on its body instead: retries of
+    # it are byte-identical. It used to take the receive time, so every
+    # retry was stored as a new event.
+    event_timestamp = (
+        payload_dict.get("timestamp") or x_meetstream_timestamp or "body:" + hashlib.sha256(raw_body).hexdigest()[:32]
+    )
 
     # 3. Idempotency Check
     idempotency_key = f"{bot_id}:{event_type}:{event_timestamp}"
@@ -153,6 +158,17 @@ async def handle_meetstream_webhook(
     )
 
 
+#: How far along a bot's life each status is. Deliveries can arrive out of
+#: order - a bot.inmeeting retried after bot.done moved a finished meeting
+#: back to "in the call" and reset its start time - so a lifecycle event
+#: only ever moves a meeting forward.
+LIFECYCLE_ORDER = {"pending": 0, "scheduled": 0, "joining": 1, "in_meeting": 2, "recording": 3, "stopped": 4, "completed": 5, "failed": 5}
+
+
+def _moves_forward(meeting, status: str) -> bool:
+    return LIFECYCLE_ORDER.get(status, 0) > LIFECYCLE_ORDER.get(meeting.status or "", -1)
+
+
 async def process_webhook_event_async(
     event_id: uuid.UUID,
     bot_id: str,
@@ -173,15 +189,15 @@ async def process_webhook_event_async(
             meeting = await meeting_repo.get_by_bot_id(bot_id)
 
             if event_type in ("bot.joining", "bot.in_waiting_room"):
-                if meeting:
+                if meeting and _moves_forward(meeting, "joining"):
                     await meeting_repo.update_status(meeting.id, status="joining")
 
             elif event_type in ("bot.inmeeting", "bot.in_meeting"):
-                if meeting:
+                if meeting and _moves_forward(meeting, "in_meeting"):
                     await meeting_repo.update_status(
                         meeting.id,
                         status="in_meeting",
-                        started_at=datetime.now(timezone.utc),
+                        started_at=None if meeting.started_at else datetime.now(timezone.utc),
                     )
                     # Admitted: the moment the introduction can reach the chat
                     # (the bot watcher does the same for installs that never
@@ -192,15 +208,15 @@ async def process_webhook_event_async(
                     await send_intro_once(db, meeting, key, client=meetstream_client)
 
             elif event_type == "bot.recording":
-                if meeting:
+                if meeting and _moves_forward(meeting, "recording"):
                     await meeting_repo.update_status(meeting.id, status="recording")
 
             elif event_type in ("bot.stopped", "bot.kicked"):
-                if meeting:
+                if meeting and _moves_forward(meeting, "stopped"):
                     await meeting_repo.update_status(
                         meeting.id,
                         status="stopped",
-                        ended_at=datetime.now(timezone.utc),
+                        ended_at=None if meeting.ended_at else datetime.now(timezone.utc),
                     )
 
             elif event_type in ("bot.failed", "bot.denied", "bot.notallowed"):
@@ -273,7 +289,7 @@ async def process_webhook_event_async(
                     )
 
             elif event_type == "bot.done":
-                if meeting:
+                if meeting and _moves_forward(meeting, "completed"):
                     await meeting_repo.update_status(meeting.id, status="completed")
 
             await webhook_repo.mark_processed(event_id)

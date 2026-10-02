@@ -88,6 +88,7 @@ class MeetingProcessingPipeline:
 
             # Create tracking job
             job = await job_repo.create_job(meeting_id=meeting.id, job_type="process_meeting_memory")
+            job_id = job.id  # still readable after a rollback expires the row
             await job_repo.start_job(job.id)
             await meeting_repo.update_status(meeting.id, processing_status="processing")
             await db.commit()
@@ -195,23 +196,21 @@ class MeetingProcessingPipeline:
                 ai_used = extraction_result.get("ai_used", True)
                 ai_error = extraction_result.get("ai_error") or "the configured model was unreachable"
 
-                # 6. Save Memories to DB
+                # 6. Save Memories to DB, replacing a previous run's (a
+                # Reprocess). Nothing is committed until step 9, so a run that
+                # fails below leaves the previous results as they were.
+                await meeting_repo.clear_extraction(meeting.id)
                 created_memories = await memory_repo.create_batch(
                     org_id=meeting.organization_id,
                     meeting_id=meeting.id,
                     memories_data=extracted_memories_data,
                 )
 
-                # 7. Save Action Items to DB
-                for act in extracted_actions_data:
-                    await action_repo.create(
-                        org_id=meeting.organization_id,
-                        meeting_id=meeting.id,
-                        task=act.get("task", ""),
-                        owner=act.get("owner"),
-                        priority=act.get("priority", "medium"),
-                        due_date=_parse_due_date(act.get("due_date")),
-                    )
+                # 7. Save Action Items to DB, matched against a previous run's
+                # so ticks and hand-written tasks survive a Reprocess.
+                await action_repo.replace_extracted(
+                    meeting.organization_id, meeting.id, extracted_actions_data, parse_due=_parse_due_date
+                )
 
                 # 8. Index into Meeting Memory RAG
                 indexed_count = await self.rag_engine.index_meeting(
@@ -231,30 +230,41 @@ class MeetingProcessingPipeline:
                 # 9. Finalize meeting record. If the AI never ran (no provider
                 # or it was unreachable), say so rather than leaving a
                 # summary-less meeting that looks broken.
-                await meeting_repo.update_status(
+                fallback_notice = None if ai_used else (
+                    f"Processed without AI ({ai_error[:300]}), so this uses a basic "
+                    "rule-based extraction. Fix the provider in Settings, then Reprocess for a full "
+                    "summary and richer action items."
+                )
+                finished = await meeting_repo.update_status(
                     meeting_id=meeting.id,
                     summary=summary,
                     processing_status="completed",
-                    processing_error=(
-                        None if ai_used else
-                        f"Processed without AI ({ai_error[:300]}), so this uses a basic "
-                        "rule-based extraction. Fix the provider in Settings, then Reprocess for a full "
-                        "summary and richer action items."
-                    ),
                 )
+                finished.processing_error = fallback_notice  # None clears a previous run's
+                await db.commit()
 
                 # 10. File the meeting in the notebook. Its own failure must
-                # not fail the meeting - the note can be regenerated later.
+                # not fail the meeting - the note can be regenerated later -
+                # but it is said on the meeting: it used to be logged only,
+                # leaving a completed meeting with no note and no reason.
                 note_written = False
                 try:
                     from app.api.notebook import _embed_note
                     from app.services.meeting_notes import MeetingNoteService
 
-                    fresh = await meeting_repo.get_by_id_unscoped(meeting.id)
+                    fresh = await meeting_repo.get_by_id_unscoped(meeting_id)
                     note = await MeetingNoteService(db).sync(fresh, embed=_embed_note)
                     note_written = note is not None
+                    await db.commit()
                 except Exception as note_exc:
-                    logger.warning(f"Could not write notebook entry for meeting {meeting.id}: {note_exc}")
+                    logger.warning(f"Could not write notebook entry for meeting {meeting_id}: {note_exc}")
+                    await db.rollback()
+                    unfiled = await meeting_repo.get_by_id_unscoped(meeting_id)
+                    unfiled.processing_error = " ".join(filter(None, [
+                        fallback_notice,
+                        f"The meeting was processed but its notebook note could not be written ({str(note_exc)[:200]}). "
+                        "Use Reprocess to try again.",
+                    ]))
 
                 result_payload = {
                     "note_written": note_written,
@@ -263,14 +273,18 @@ class MeetingProcessingPipeline:
                     "vectors_indexed": indexed_count,
                 }
 
-                await job_repo.complete_job(job.id, result=result_payload)
+                await job_repo.complete_job(job_id, result=result_payload)
                 await db.commit()
                 return result_payload
 
             except Exception as e:
-                await job_repo.complete_job(job.id, error=str(e))
+                # Undo whatever this run wrote but did not commit - otherwise a
+                # failure while indexing left the new memories and tasks on a
+                # meeting marked failed - then record the failure.
+                await db.rollback()
+                await job_repo.complete_job(job_id, error=str(e))
                 await meeting_repo.update_status(
-                    meeting_id=meeting.id,
+                    meeting_id=meeting_id,
                     processing_status="failed",
                     processing_error=str(e),
                 )

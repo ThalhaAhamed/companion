@@ -291,14 +291,14 @@ class MeetingMemoryRAG:
         # Date / type filters are applied to the fused candidate pool. The
         # pool is a few times larger than `limit`, so filtering here keeps
         # the vector index's approximate search unchanged.
+        def _record_date(record):
+            stored = (record.metadata_ or {}).get("meeting_date")
+            if stored:
+                return date.fromisoformat(stored)
+            return record.created_at.date() if record.created_at else None
+
         if memory_type or date_from or date_to:
             wanted_type = getattr(memory_type, "value", memory_type)
-
-            def _record_date(record):
-                stored = (record.metadata_ or {}).get("meeting_date")
-                if stored:
-                    return date.fromisoformat(stored)
-                return record.created_at.date() if record.created_at else None
 
             def _keep(item):
                 record = records_by_id[item["id"]]
@@ -333,7 +333,11 @@ class MeetingMemoryRAG:
                 # _find_date_mentions' docstring for why that resolution has
                 # to happen relative to the meeting, not to whenever this
                 # search runs).
-                meeting_matches = bool(record.created_at and record.created_at.date() == date_hint)
+                # The day the meeting was held - stored at index time. Not
+                # created_at: that is when the chunk was indexed, so an
+                # uploaded or reprocessed past meeting matched the wrong day.
+                held = _record_date(record)
+                meeting_matches = held == date_hint
                 content_matches = date_hint_str in ((record.metadata_ or {}).get("mentioned_dates") or [])
                 return 0 if (meeting_matches or content_matches) else 1
             fused = sorted(fused, key=_date_rank)

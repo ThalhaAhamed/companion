@@ -7,6 +7,7 @@ than an afterthought.
 """
 from __future__ import annotations
 
+import os
 from typing import List, Optional
 
 import httpx
@@ -17,6 +18,27 @@ from app.providers.llm.base import (
     LLMProvider,
     ProviderStatus,
 )
+
+
+#: Ollama's context window when the request does not set one is small (2048
+#: tokens on Ollama 0.35) and anything longer is cut from the *start* without
+#: an error. Measured: an 8,948-token prompt was read as 2,050 tokens and the
+#: model answered from what was left. That start is the system prompt - the
+#: Ask AI grounding rules - and, for extraction, most of a long transcript.
+#: One fixed size rather than one per request: Ollama reloads the model
+#: whenever num_ctx changes. 16k covers Ask AI's context and an extraction
+#: pass; a larger prompt gets 32k. OLLAMA_NUM_CTX overrides both.
+DEFAULT_NUM_CTX = 16384
+LARGE_NUM_CTX = 32768
+
+
+def context_window_for(messages: List[ChatMessage], max_tokens: Optional[int]) -> int:
+    override = os.environ.get("OLLAMA_NUM_CTX")
+    if override and override.isdigit():
+        return int(override)
+    # ~3 characters per token is a safe over-estimate for English prose.
+    needed = sum(len(m.content) for m in messages) // 3 + (max_tokens or 2048) + 256
+    return DEFAULT_NUM_CTX if needed <= DEFAULT_NUM_CTX else LARGE_NUM_CTX
 
 
 class OllamaProvider(LLMProvider):
@@ -34,8 +56,11 @@ class OllamaProvider(LLMProvider):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
-        options = {"temperature": self._temperature(temperature)}
         resolved_max_tokens = self._max_tokens(max_tokens)
+        options = {
+            "temperature": self._temperature(temperature),
+            "num_ctx": context_window_for(messages, resolved_max_tokens),
+        }
         if resolved_max_tokens:
             options["num_predict"] = resolved_max_tokens
 
@@ -92,4 +117,4 @@ def _raise_for_status(response: httpx.Response, label: str) -> None:
     detail = response.text.strip()
     if len(detail) > 500:
         detail = f"{detail[:500]}…"
-    raise LLMError(f"{label} request failed ({response.status_code}): {detail}")
+    raise LLMError(f"{label} request failed ({response.status_code}): {detail}", status_code=response.status_code)

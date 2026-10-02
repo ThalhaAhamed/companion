@@ -53,6 +53,18 @@ class OpenAICompatibleProvider(LLMProvider):
                 headers=self._headers(),
                 json=payload,
             )
+            if json_mode and response.status_code in (400, 422):
+                # Plenty of servers that speak this format reject
+                # response_format (LM Studio wants a json_schema, older vLLM
+                # and llama.cpp builds refuse it outright). That used to send
+                # every meeting to the rule-based fallback; asking again
+                # without it lets complete_json() recover the JSON from text.
+                payload.pop("response_format")
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=self._headers(),
+                    json=payload,
+                )
             _raise_for_status(response, self.label)
             data = response.json()
 
@@ -123,4 +135,4 @@ def _raise_for_status(response: httpx.Response, label: str) -> None:
     detail = response.text.strip()
     if len(detail) > 500:
         detail = f"{detail[:500]}…"
-    raise LLMError(f"{label} request failed ({response.status_code}): {detail}")
+    raise LLMError(f"{label} request failed ({response.status_code}): {detail}", status_code=response.status_code)

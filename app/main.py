@@ -30,7 +30,6 @@ from app.api.export import router as export_router
 from app.mcp.server import router as mcp_router
 from app.middleware.auth_gate import AuthGateMiddleware
 from app.middleware.limits import RequestLimitsMiddleware
-from app.services.embedding import embedding_service
 from app.database.bootstrap import bootstrap
 from app.database.connection import current_engine
 
@@ -53,8 +52,18 @@ async def lifespan(app: FastAPI):
     # Load the embedding model now, in a background thread, so the first real
     # search/index request isn't the one paying the multi-second model load
     # cost (and blocking the event loop while it loads).
+    # Then give a vector to any note saved while the model was unavailable.
     import asyncio
-    asyncio.create_task(embedding_service.warmup_async())
+
+    async def warm_up_embeddings():
+        from app.api.notebook import embed_missing_notes
+
+        try:
+            await embed_missing_notes()
+        except Exception as exc:  # never let a backfill take the server down
+            logger.warning("Could not embed notes saved without a vector: %s", exc)
+
+    asyncio.create_task(warm_up_embeddings())
     # Keeps launched bots' meetings current by asking MeetStream, for the
     # installs its webhooks cannot reach (see app.services.bot_watch).
     from app.services.bot_watch import bot_watcher
