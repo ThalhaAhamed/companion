@@ -16,6 +16,7 @@ Everything is configurable from **Settings** in the app. Precedence is:
 | `LLM_MODEL` | per provider | Model name |
 | `LLM_API_KEY` | none | Hosted providers only |
 | `LLM_BASE_URL` | per provider | Proxies, gateways, self-hosted endpoints |
+| `ALLOW_PRIVATE_LLM_BASE_URL` | `true` | Whether a workspace owner's AI base URL (Members page) may point at a private or loopback address (10/8, 172.16/12, 192.168/16, 127/8). Set `false` on a server where people you do not trust can sign up. Link-local and cloud metadata addresses (169.254.0.0/16, `fd00:ec2::254`, `100.100.100.200`, `metadata.google.internal`) are always refused. The install's own provider is not affected |
 | `OLLAMA_NUM_CTX` | `16384` (`32768` for larger prompts) | Context window requested from Ollama. Its own default (2048 on Ollama 0.35) silently cuts long prompts from the start; lower this only if the model runs out of memory |
 | `MEETSTREAM_API_KEY` | none | Deployment-wide key; each member can also add their own in Settings |
 | `MEETSTREAM_WEBHOOK_SECRET` | none | Signature check for webhook deliveries (also settable in Settings) |

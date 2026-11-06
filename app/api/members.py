@@ -158,6 +158,24 @@ class WorkspaceAIUpdate(BaseModel):
     max_tokens: int | None = None
 
 
+def _check_workspace_base_url(base_url: str) -> None:
+    """
+    A workspace owner's base URL: an http(s) URL that is not a metadata or
+    link-local address (nor, when the server says so, a private one). The
+    hostname is checked again each time a connection opens.
+    """
+    from urllib.parse import urlsplit
+
+    from app.providers.llm.egress import base_url_refusal
+
+    parts = urlsplit(base_url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise HTTPException(status_code=400, detail="The base URL must be an http:// or https:// address.")
+    refusal = base_url_refusal(base_url, allow_private=settings.ALLOW_PRIVATE_LLM_BASE_URL)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+
+
 def _workspace_ai_config(body: WorkspaceAIUpdate, stored: Dict[str, Any]) -> Dict[str, Any]:
     """Validate an owner's AI settings; a blank key means the saved one, as in Settings."""
     from app.providers.llm import DESCRIPTORS
@@ -175,9 +193,25 @@ def _workspace_ai_config(body: WorkspaceAIUpdate, stored: Dict[str, Any]) -> Dic
             detail=f"{DESCRIPTORS[provider].label} runs on each person's own machine, so it cannot be shared "
                    "by the workspace. Pick a hosted provider, or let each member use their own.",
         )
+    base_url = (body.base_url or "").strip() or None
+    if base_url:
+        _check_workspace_base_url(base_url)
     api_key = (body.api_key or "").strip() or None
-    if api_key is None and stored.get("provider") == provider:
-        api_key = stored.get("api_key")
+    if api_key is None and stored.get("provider") == provider and stored.get("api_key"):
+        # A blank key means the saved one - but only for the address it was
+        # saved for. Otherwise any co-owner could point the base URL at a
+        # host of their own and have the server hand it the workspace key.
+        from app.api.setup import _effective_base_url
+        from app.providers.llm import PROVIDERS
+
+        if _effective_base_url(provider, base_url) == _effective_base_url(provider, stored.get("base_url")):
+            api_key = stored.get("api_key")
+        elif PROVIDERS[provider].requires_api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="The base URL changed, so enter the API key again. "
+                       "The saved key is only sent to the address it was saved for.",
+            )
     if body.temperature is not None and not 0.0 <= body.temperature <= 2.0:
         raise HTTPException(status_code=400, detail="Temperature must be between 0 and 2.")
     if body.max_tokens is not None and body.max_tokens <= 0:
@@ -187,7 +221,7 @@ def _workspace_ai_config(body: WorkspaceAIUpdate, stored: Dict[str, Any]) -> Dic
         "provider": provider,
         "model": (body.model or "").strip() or None,
         "api_key": api_key,
-        "base_url": (body.base_url or "").strip() or None,
+        "base_url": base_url,
         "temperature": body.temperature,
         "max_tokens": body.max_tokens,
     }

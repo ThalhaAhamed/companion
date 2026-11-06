@@ -143,6 +143,7 @@ Set from **Settings** in the app, saved to `data/config.json`. An **environment 
 | `MEETSTREAM_API_KEY` | per member | Lets the app send bots into calls |
 | `MCP_SERVER_URL` | none | Public URL MeetStream reaches your server on |
 | `ALLOW_SELF_SIGNUP` | `true` | `false` on a public server: only owners add members |
+| `ALLOW_PRIVATE_LLM_BASE_URL` | `true` | `false` on a public server: workspace AI base URLs cannot reach private addresses |
 
 Every variable: [docs/configuration.md](docs/configuration.md).
 

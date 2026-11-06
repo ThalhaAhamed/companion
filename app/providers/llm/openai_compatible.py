@@ -17,6 +17,7 @@ from app.providers.llm.base import (
     LLMError,
     LLMProvider,
     ProviderStatus,
+    raise_for_status,
 )
 
 
@@ -47,7 +48,7 @@ class OpenAICompatibleProvider(LLMProvider):
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+        async with self._http_client(self.config.timeout_seconds) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers=self._headers(),
@@ -65,7 +66,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     headers=self._headers(),
                     json=payload,
                 )
-            _raise_for_status(response, self.label)
+            raise_for_status(response, self.label)
             data = response.json()
 
         try:
@@ -75,9 +76,9 @@ class OpenAICompatibleProvider(LLMProvider):
 
     async def health_check(self) -> ProviderStatus:
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with self._http_client(15.0) as client:
                 response = await client.get(f"{self.base_url}/models", headers=self._headers())
-                _raise_for_status(response, self.label)
+                raise_for_status(response, self.label)
                 data = response.json()
         except LLMError as exc:
             return ProviderStatus(ok=False, detail=str(exc))
@@ -127,12 +128,3 @@ class XAIProvider(OpenAICompatibleProvider):
     label = "xAI (Grok)"
     requires_api_key = True
     default_base_url = "https://api.x.ai/v1"
-
-
-def _raise_for_status(response: httpx.Response, label: str) -> None:
-    if response.is_success:
-        return
-    detail = response.text.strip()
-    if len(detail) > 500:
-        detail = f"{detail[:500]}…"
-    raise LLMError(f"{label} request failed ({response.status_code}): {detail}", status_code=response.status_code)

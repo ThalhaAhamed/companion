@@ -10,6 +10,7 @@ from app.providers.llm.base import (
     LLMError,
     LLMProvider,
     ProviderStatus,
+    raise_for_status,
 )
 
 
@@ -53,9 +54,9 @@ class GeminiProvider(LLMProvider):
             payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
         url = f"{self.base_url}/v1beta/models/{self.config.model}:generateContent"
-        async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+        async with self._http_client(self.config.timeout_seconds) as client:
             response = await client.post(url, headers=self._headers(), json=payload)
-            _raise_for_status(response, self.label)
+            raise_for_status(response, self.label)
             data = response.json()
 
         candidates = data.get("candidates") or []
@@ -69,11 +70,11 @@ class GeminiProvider(LLMProvider):
 
     async def health_check(self) -> ProviderStatus:
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with self._http_client(15.0) as client:
                 response = await client.get(
                     f"{self.base_url}/v1beta/models", headers=self._headers()
                 )
-                _raise_for_status(response, self.label)
+                raise_for_status(response, self.label)
                 data = response.json()
         except LLMError as exc:
             return ProviderStatus(ok=False, detail=str(exc))
@@ -94,12 +95,3 @@ class GeminiProvider(LLMProvider):
             "Content-Type": "application/json",
             "x-goog-api-key": self.config.api_key or "",
         }
-
-
-def _raise_for_status(response: httpx.Response, label: str) -> None:
-    if response.is_success:
-        return
-    detail = response.text.strip()
-    if len(detail) > 500:
-        detail = f"{detail[:500]}…"
-    raise LLMError(f"{label} request failed ({response.status_code}): {detail}", status_code=response.status_code)

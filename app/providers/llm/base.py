@@ -9,11 +9,16 @@ Settings UI) and exercised in tests without patching module state.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import httpx
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Literal, Optional
+
+from app.providers.llm import egress
+
+logger = logging.getLogger(__name__)
 
 Role = Literal["system", "user", "assistant"]
 
@@ -60,6 +65,11 @@ class LLMConfig:
     max_tokens: Optional[int] = None
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     extra: Dict[str, Any] = field(default_factory=dict)
+    #: Whether base_url may point at a private or loopback address. True for
+    #: the install's own provider (its administrator runs the server anyway);
+    #: workspace settings follow ALLOW_PRIVATE_LLM_BASE_URL. Link-local and
+    #: cloud metadata addresses are refused either way (see egress.py).
+    allow_private_network: bool = True
 
 
 @dataclass(slots=True)
@@ -115,6 +125,15 @@ class LLMProvider(ABC):
             raise LLMConfigError(f"{self.label} requires an API key.")
         if not self.config.model:
             raise LLMConfigError(f"{self.label} requires a model name.")
+        refusal = egress.base_url_refusal(
+            self.config.base_url or self.default_base_url, allow_private=self.config.allow_private_network
+        )
+        if refusal:
+            raise LLMConfigError(refusal)
+
+    def _http_client(self, timeout: float) -> httpx.AsyncClient:
+        """Every provider request goes through this client, so through the egress guard."""
+        return egress.client(timeout, allow_private=self.config.allow_private_network)
 
     @property
     def base_url(self) -> str:
@@ -200,6 +219,37 @@ class LLMProvider(ABC):
 
     def _max_tokens(self, override: Optional[int]) -> Optional[int]:
         return self.config.max_tokens if override is None else override
+
+
+#: What to tell a person when a provider answers with an error status. The
+#: response body is not repeated: the base URL can point anywhere, and its
+#: error page is not ours to hand back (a 403 from an internal service is
+#: still that service's content).
+_STATUS_HINTS = {
+    400: "rejected the request. Check the model name and the settings.",
+    401: "rejected the API key. Check the key.",
+    403: "refused access. Check that the key may use this model.",
+    404: "has no such endpoint or model. Check the base URL and the model name.",
+    408: "timed out. Try again.",
+    413: "says the request is too large. Try a model with a larger context window.",
+    422: "could not process the request. Check the model name and the settings.",
+    429: "is rate limiting requests or the account is out of credit. Try again later, or check the plan.",
+}
+
+
+def raise_for_status(response: httpx.Response, label: str) -> None:
+    """Raise LLMError for an error status, with a sentence that says what to check."""
+    if response.is_success:
+        return
+    status = response.status_code
+    if status in _STATUS_HINTS:
+        hint = _STATUS_HINTS[status]
+    elif status >= 500:
+        hint = "had a server error. Try again later."
+    else:
+        hint = "answered with an error."
+    logger.debug("%s answered %s: %s", label, status, response.text[:500])
+    raise LLMError(f"{label} request failed ({status}): {label} {hint}", status_code=status)
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)

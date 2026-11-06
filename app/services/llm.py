@@ -135,6 +135,10 @@ def _build_workspace_config(raw: Dict[str, Any]) -> LLMConfig:
         base_url=raw.get("base_url") or _default_field(descriptor, "base_url"),
         temperature=float(settings.LLM_TEMPERATURE if temperature is None else temperature),
         max_tokens=raw.get("max_tokens") or settings.LLM_MAX_TOKENS,
+        # A workspace owner is anyone who signed up, not the person who runs
+        # the server: whether their base URL may reach the server's private
+        # network is the operator's call.
+        allow_private_network=settings.ALLOW_PRIVATE_LLM_BASE_URL,
     )
 
 
