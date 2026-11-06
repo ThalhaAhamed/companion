@@ -15,13 +15,17 @@ bearer token, called by the voice agent rather than a browser).
 """
 import hmac
 import hashlib
+import logging
+import os
 import time
 import uuid
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
-from app.secrets import session_secret
+from app.secrets import session_secret, setup_token
+
+logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "hub_session"
 #: Set by the desktop shell before it loads the UI, never by the page itself.
@@ -43,6 +47,16 @@ FIRST_RUN_PREFIXES = ("/api/setup",)
 #: account yet?" before it can show sign-in. The endpoint itself strips the
 #: answer down to exactly those bits when nobody is signed in.
 BOOT_PATHS = ("/api/setup/status",)
+
+#: SETUP_TOKEN (see app/secrets.py): the browser presents it once as
+#: /?setup_token=..., and keeps it as this cookie until setup is done.
+SETUP_TOKEN_PARAM = "setup_token"
+SETUP_COOKIE_NAME = "mc_setup"
+SETUP_COOKIE_TTL_SECONDS = 24 * 60 * 60
+SETUP_LOCKED_DETAIL = (
+    "This server is locked until setup is finished. Open the setup link from the server log "
+    "(it ends in ?setup_token=...) in this browser, then try again."
+)
 
 
 def _key() -> bytes:
@@ -76,7 +90,10 @@ async def any_account_exists() -> bool:
     the answer is no: an install with members but no saved configuration
     (config.json deleted, data directory moved) must not let an anonymous
     caller reconfigure the AI provider or reset the install.
-    Safe before the database is configured (returns False).
+    Fails closed: if the database cannot answer, assume accounts exist, so
+    a database outage locks setup rather than opening it to anyone. (The
+    schema is built at startup, before any request, so a fresh install
+    answers "no" here without an error.)
     """
     try:
         from app.database.connection import get_db_context
@@ -84,8 +101,9 @@ async def any_account_exists() -> bool:
 
         async with get_db_context() as db:
             return (await db.execute(select(User.id).limit(1))).first() is not None
-    except Exception:
-        return False
+    except Exception as exc:
+        logger.warning("Could not check for accounts; treating setup as closed: %s", exc.__class__.__name__)
+        return True
 
 
 async def first_run_open() -> bool:
@@ -93,6 +111,63 @@ async def first_run_open() -> bool:
     from app.runtime_config import is_configured
 
     return not is_configured() and not await any_account_exists()
+
+
+def setup_token_presented(request: Request) -> bool:
+    """True when setup is not locked by SETUP_TOKEN, or the browser holds the token."""
+    expected = setup_token()
+    if expected is None:
+        return True
+    presented = request.cookies.get(SETUP_COOKIE_NAME) or ""
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _accept_setup_link(request: Request) -> RedirectResponse:
+    """
+    /?setup_token=... from the server log: keep the token as an HttpOnly
+    cookie and drop it from the address bar, so it is not left in the
+    browser history or sent on as a Referer.
+    """
+    from urllib.parse import urlencode
+
+    from app.api.auth import cookie_flags
+
+    presented = request.query_params.get(SETUP_TOKEN_PARAM) or ""
+    remaining = [(k, v) for k, v in request.query_params.multi_items() if k != SETUP_TOKEN_PARAM]
+    target = request.url.path + (f"?{urlencode(remaining)}" if remaining else "")
+    response = RedirectResponse(target, status_code=303)
+    expected = setup_token()
+    if expected is not None and hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
+        response.set_cookie(
+            key=SETUP_COOKIE_NAME, value=presented, max_age=SETUP_COOKIE_TTL_SECONDS, httponly=True,
+            **cookie_flags(request),
+        )
+    return response
+
+
+async def announce_setup_lock() -> None:
+    """At startup: say how to unlock setup, while it is still locked and needed."""
+    from app.config import settings
+    from app.secrets import setup_token_is_generated
+
+    expected = setup_token()
+    if expected is None or await any_account_exists():
+        return
+    port = os.environ.get("PORT") or settings.APP_PORT  # the Docker image listens on $PORT
+    if setup_token_is_generated():
+        # Printed on purpose, like a notebook server's login link: whoever can
+        # read this server's log already controls the server. It stops
+        # mattering the moment the first account exists.
+        logger.warning(
+            "Setup is locked. To finish it, open http://<this server>:%s/?%s=%s in your browser.",
+            port, SETUP_TOKEN_PARAM, expected,
+        )
+    else:
+        logger.warning(
+            "Setup is locked by SETUP_TOKEN. To finish it, open http://<this server>:%s/?%s=<your SETUP_TOKEN> "
+            "in your browser.",
+            port, SETUP_TOKEN_PARAM,
+        )
 
 
 async def verify_session(token: str) -> bool:
@@ -111,6 +186,13 @@ async def verify_session(token: str) -> bool:
 class AuthGateMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        if (
+            request.method == "GET"
+            and SETUP_TOKEN_PARAM in request.query_params
+            and not path.startswith("/api/")
+        ):
+            return _accept_setup_link(request)
+
         if not path.startswith("/api/") or path.startswith(EXEMPT_PREFIXES):
             return await call_next(request)
 
@@ -118,6 +200,8 @@ class AuthGateMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if path.startswith(FIRST_RUN_PREFIXES) and await first_run_open():
+            if not setup_token_presented(request):
+                return JSONResponse(status_code=403, content={"detail": SETUP_LOCKED_DETAIL})
             return await call_next(request)
 
         token = request.cookies.get(COOKIE_NAME)

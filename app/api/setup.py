@@ -46,7 +46,9 @@ from app.runtime_config import (
 )
 from app.services.llm import build_llm_config
 from app.api.deps import SERVER_ADMIN_ONLY, is_instance_admin
-from app.middleware.auth_gate import COOKIE_NAME, any_account_exists, decode_session, first_run_open
+from app.middleware.auth_gate import (
+    COOKIE_NAME, SETUP_LOCKED_DETAIL, any_account_exists, decode_session, first_run_open, setup_token_presented,
+)
 
 
 async def require_setup_access(request: Request) -> None:
@@ -58,7 +60,11 @@ async def require_setup_access(request: Request) -> None:
     to the endpoints it protects.
     """
     if await first_run_open():
-        return
+        if setup_token_presented(request):
+            return
+        # SETUP_TOKEN locks setup and this browser does not hold it. 401, so
+        # /api/setup/status answers with the signed-out summary.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SETUP_LOCKED_DETAIL)
     from app.database.connection import get_db_context
     from app.models.database import User
     from sqlalchemy import select

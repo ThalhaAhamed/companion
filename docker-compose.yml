@@ -6,13 +6,26 @@
 #
 # The first visit walks through onboarding. Configuration saved there lives
 # in the `data` volume together with the database and the embedding model.
+#
+# The port is published on 127.0.0.1 only. Until the first account exists,
+# setup has no password, and the first account administers the server - so
+# a server reachable from the network goes to whoever opens it first.
+# To reach it from other machines, finish setup first (an SSH tunnel works:
+# ssh -L 8000:localhost:8000 you@server), or lock setup with SETUP_TOKEN,
+# then publish the port on all interfaces:
+#
+#   SETUP_TOKEN=auto APP_BIND=0.0.0.0 docker compose up -d
+#   docker compose logs app | grep setup_token   # the one-time setup link
+#
+# Docker's port rules bypass host firewalls such as ufw. For anything public,
+# put a reverse proxy with HTTPS in front (see SECURITY.md).
 
 services:
   app:
     build: .
     container_name: meet_companion
     ports:
-      - "8000:8000"
+      - "${APP_BIND:-127.0.0.1}:8000:8000"
     volumes:
       - data:/data
     environment:
@@ -22,6 +35,8 @@ services:
       # MEETSTREAM_API_KEY: ${MEETSTREAM_API_KEY}
       # MEETSTREAM_WEBHOOK_SECRET: ${MEETSTREAM_WEBHOOK_SECRET}
       # SESSION_SECRET: ${SESSION_SECRET}
+      # Lock first-run setup behind a token ("auto" prints a setup link to the log):
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
       # Public URL MeetStream can reach for webhooks and MCP (see README):
       # MCP_SERVER_URL: https://companion.example.com/mcp
       CORS_ORIGINS: '["http://localhost:8000"]'

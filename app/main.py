@@ -49,6 +49,10 @@ async def lifespan(app: FastAPI):
 
     device_secret()
     await bootstrap(current_engine())
+    # With SETUP_TOKEN set, say in the log how to unlock first-run setup.
+    from app.middleware.auth_gate import announce_setup_lock
+
+    await announce_setup_lock()
     # Load the embedding model now, in a background thread, so the first real
     # search/index request isn't the one paying the multi-second model load
     # cost (and blocking the event loop while it loads).

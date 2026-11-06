@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.connection import get_db
 from app.models.database import Membership, Organization, User
-from app.middleware.auth_gate import COOKIE_NAME, decode_session
+from app.middleware.auth_gate import COOKIE_NAME, SETUP_LOCKED_DETAIL, decode_session, setup_token_presented
 from app.api.deps import (
     OWNER, get_current_account, get_current_org_id, get_current_user, is_instance_admin,
     is_owner, pin_admin_workspace, require_active_membership, require_owner,
@@ -508,6 +508,10 @@ async def add_member(body: CreateMemberRequest, request: Request, db: AsyncSessi
         # A deployment can switch that off; the very first account is always
         # allowed, or nobody could ever sign in.
         first_account = (await db.execute(select(func.count(User.id)))).scalar_one() == 0
+        if first_account and not setup_token_presented(request):
+            # The first account administers the server. With SETUP_TOKEN set,
+            # only the person holding the token from the server log may make it.
+            raise HTTPException(status_code=403, detail=SETUP_LOCKED_DETAIL)
         if not settings.ALLOW_SELF_SIGNUP and not first_account:
             raise HTTPException(
                 status_code=403,

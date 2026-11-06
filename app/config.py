@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # On by default - a personal or team install wants that. Off for a server
     # on the public internet you do not want strangers making workspaces on.
     ALLOW_SELF_SIGNUP: bool = True
+    # Lock first-run setup (and the first account, which becomes the server
+    # administrator) behind a token. Unset by default: a laptop install
+    # listens on 127.0.0.1 only. "auto" makes a random token and writes a
+    # setup link to the log; any other value is the token itself. Set it on a
+    # server that is reachable before you finish setup.
+    SETUP_TOKEN: Optional[str] = None
 
     # ---- Database ----
     # Local SQLite by default so the application runs with no external

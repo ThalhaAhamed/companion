@@ -59,6 +59,12 @@ boundaries before exposing an instance beyond localhost:
   webhook deliveries are signature-checked.
 - Keep the generated `data/session.key` private; rotating it signs everyone out.
 - Bind to `127.0.0.1` (the default) unless the server is meant to be reachable.
+  Docker Compose publishes the port on `127.0.0.1` too; `APP_BIND=0.0.0.0`
+  opens it to the network.
+- Finish setup before the server is reachable, or set `SETUP_TOKEN=auto`. Until
+  the first account exists, setup has no password and the first account is the
+  instance admin. With a setup token, only the person who opens the setup link
+  from the server log can do the setup.
 - Behind a reverse proxy, set `TRUST_PROXY=true` so rate limiting sees real
   client addresses; never set it when clients connect directly.
 - Leave `API_DOCS` off in production (the default outside development).

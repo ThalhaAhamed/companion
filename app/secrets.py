@@ -144,3 +144,29 @@ def device_secret() -> str:
     if _device_secret is None:
         _device_secret = _file_secret("device.key")
     return _device_secret
+
+
+def setup_token() -> Optional[str]:
+    """
+    The token that unlocks first-run setup, or None when setup is not locked.
+
+    SETUP_TOKEN unset: no token, as before (a laptop install listens on
+    127.0.0.1 and the desktop app is already the only visitor). SETUP_TOKEN
+    =auto: one random token per install, kept in <data>/setup.token so every
+    worker and every restart agree on it. Any other value: that value.
+    """
+    value = _setup_token_setting()
+    if not value:
+        return None
+    if setup_token_is_generated():
+        return _file_secret("setup.token")
+    return value
+
+
+def setup_token_is_generated() -> bool:
+    """SETUP_TOKEN=auto: the server made the token, so only its log can tell people what it is."""
+    return (_setup_token_setting() or "").lower() == "auto"
+
+
+def _setup_token_setting() -> Optional[str]:
+    return next((v.strip() for v in _configured("SETUP_TOKEN") if v and v.strip()), None)

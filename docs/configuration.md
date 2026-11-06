@@ -26,6 +26,8 @@ Everything is configurable from **Settings** in the app. Precedence is:
 | `TRUST_PROXY` | `false` | Read client address/scheme from `X-Forwarded-*` - only behind your own reverse proxy |
 | `API_DOCS` | dev only | Interactive API docs at `/docs` |
 | `ALLOW_SELF_SIGNUP` | `true` | Let people create their own account (new workspace, or join with a code). Set `false` on a public server so only owners can add members; the first account is always allowed |
+| `SETUP_TOKEN` | unset | Lock first-run setup and the first account (the server administrator) behind a token. `auto` makes a random token and writes a setup link to the server log; any other value is the token. Open `/?setup_token=<token>` once in the browser you use for setup. Unset: setup is open until the first account exists |
+| `APP_BIND` | `127.0.0.1` | Docker Compose only: the host address the port is published on. `0.0.0.0` makes the app reachable from other machines |
 
 Configuration saved from the UI lives in `data/config.json` next to the SQLite
 database, alongside `session.key`. All of `data/` is gitignored - it holds API
@@ -37,6 +39,22 @@ keys.
 docker compose up -d                       # app + SQLite, http://localhost:8000
 docker compose --profile postgres up -d    # app + a pgvector Postgres to pick in Settings
 ```
+
+The port is published on `127.0.0.1` only. Until the first account exists,
+setup has no password, and the first account is the server administrator. So
+do not publish a new install on a network before setup is done, or lock setup
+with a token first:
+
+```bash
+SETUP_TOKEN=auto APP_BIND=0.0.0.0 docker compose up -d
+docker compose logs app | grep setup_token     # open that link once, in your browser
+```
+
+Another way: keep the default, open an SSH tunnel
+(`ssh -L 8000:localhost:8000 you@server`), finish setup at
+<http://localhost:8000>, then restart with `APP_BIND=0.0.0.0`. Docker's port
+rules bypass host firewalls such as ufw. For a public server, put a reverse
+proxy with HTTPS in front and keep `APP_BIND` at `127.0.0.1`.
 
 One image contains the API and the built UI; everything it writes goes to the
 `data` volume. Set `LLM_PROVIDER`/`LLM_API_KEY` (and friends) in

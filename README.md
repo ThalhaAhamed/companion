@@ -142,6 +142,7 @@ Set from **Settings** in the app, saved to `data/config.json`. An **environment 
 | `DATABASE_URL` | local SQLite | `postgresql://…` for a shared or hosted database |
 | `MEETSTREAM_API_KEY` | per member | Lets the app send bots into calls |
 | `MCP_SERVER_URL` | none | Public URL MeetStream reaches your server on |
+| `SETUP_TOKEN` | unset | `auto` on a server reachable before setup: the setup link is in the log |
 | `ALLOW_SELF_SIGNUP` | `true` | `false` on a public server: only owners add members |
 
 Every variable: [docs/configuration.md](docs/configuration.md).

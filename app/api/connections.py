@@ -37,12 +37,12 @@ async def require_device_or_first_run(request: Request) -> None:
     The desktop app, or a fresh install still in its setup wizard - the two
     places a person picks a database *and* a join code at the same time.
     """
-    from app.middleware.auth_gate import first_run_open
+    from app.middleware.auth_gate import first_run_open, setup_token_presented
 
     try:
         await require_device(request)
     except HTTPException:
-        if not await first_run_open():
+        if not await first_run_open() or not setup_token_presented(request):
             raise
 
 
