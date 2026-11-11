@@ -54,8 +54,9 @@ boundaries before exposing an instance beyond localhost:
   `fd00:ec2::254`, `100.100.100.200`, `metadata.google.internal`). The check
   uses the address that the connection actually goes to, so a DNS change
   after the check has no effect. Private and loopback addresses are allowed
-  by default, because teams use internal LLM gateways. Provider errors do
-  not include the response body. A saved key is only sent to the base URL it
+  by default, because teams use internal LLM gateways. Errors from a
+  workspace's provider do not include the response body; the install's own
+  provider shows only the error message from its JSON reply. A saved key is only sent to the base URL it
   was saved with: a changed base URL needs the key again.
 
 ## Hardening checklist

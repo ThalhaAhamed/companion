@@ -126,6 +126,55 @@ async def test_provider_errors_do_not_echo_the_upstream_body(httpx_mock):
     assert "403" in str(exc.value) and "OpenAI" in str(exc.value)
 
 
+OLLAMA_OOM = {"error": "model requires more system memory (5.6 GiB) than is available (1.1 GiB)"}
+
+
+@pytest.mark.asyncio
+async def test_the_install_provider_still_says_what_went_wrong(httpx_mock):
+    """
+    Hiding every reply body turned Ollama's 500 "model requires more system
+    memory" into "had a server error. Try again later." - advice that does
+    not help. The install's own provider keeps the reply's own message.
+    """
+    httpx_mock.add_response(url="http://localhost:11434/api/chat", status_code=500, json=OLLAMA_OOM)
+    provider = create_llm_provider(LLMConfig(provider="ollama", model="llama3.2"))
+    with pytest.raises(LLMError) as exc:
+        await provider.complete(MESSAGES)
+    assert "requires more system memory" in str(exc.value) and "(500)" in str(exc.value)
+
+    # Anthropic nests it: {"error": {"message": ...}}; long messages are cut.
+    httpx_mock.add_response(status_code=400, json={"type": "error", "error": {"type": "invalid_request_error",
+                                                   "message": "model: claude-x " + "x" * 600}})
+    provider = create_llm_provider(LLMConfig(provider="anthropic", model="claude-x", api_key="k"))
+    with pytest.raises(LLMError) as exc:
+        await provider.complete(MESSAGES)
+    assert "model: claude-x" in str(exc.value) and len(str(exc.value)) < 400
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_provider_does_not_read_back_the_reply(httpx_mock):
+    # A workspace base URL can point at an internal JSON service: its message
+    # is not handed back, only the hint.
+    httpx_mock.add_response(status_code=500, json={"error": "db password hunter2"})
+    provider = create_llm_provider(build_llm_config({
+        "mode": "workspace", "provider": "openai_compatible", "model": "m", "base_url": "http://10.0.0.5:8000/v1",
+    }))
+    with pytest.raises(LLMError) as exc:
+        await provider.complete(MESSAGES)
+    assert "hunter2" not in str(exc.value) and "server error" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_carrier_grade_nat_is_refused_at_connect_time_when_switched_off(monkeypatch, rebind):
+    # 100.64.0.0/10 is not "private" to Python's is_private, but it is not
+    # public either: Tailscale addresses live there.
+    monkeypatch.setattr(settings, "ALLOW_PRIVATE_LLM_BASE_URL", False, raising=False)
+    rebind["ip"] = "100.101.102.103"
+    with pytest.raises(LLMError) as exc:
+        await _workspace_provider(8000).complete(MESSAGES)
+    assert "private or loopback" in str(exc.value)
+
+
 @pytest.mark.asyncio
 async def test_private_addresses_are_refused_at_connect_time_when_switched_off(monkeypatch, rebind, local_llm):
     # The hostname passes every check that does not resolve it; only the
@@ -188,6 +237,14 @@ async def test_metadata_address_is_refused_when_an_outbound_proxy_is_set(monkeyp
     ("http://localhost:11434", False, True),
     ("http://localhost:11434", True, False),
     ("https://api.openai.com/v1", False, False),
+    # Carrier-grade NAT / Tailscale: not public, so refused when private is off.
+    ("http://100.64.0.1/v1", False, True),
+    ("http://100.127.255.254/v1", False, True),
+    ("http://100.64.0.1/v1", True, False),
+    # The metadata address wrapped in IPv6 (NAT64, 6to4) is still the metadata address.
+    ("http://[64:ff9b::a9fe:a9fe]/", True, True),
+    ("http://[2002:a9fe:a9fe::]/", True, True),
+    ("http://[64:ff9b::808:808]/", False, False),
 ])
 def test_base_url_refusal_without_resolving(url, allow_private, refused):
     from app.providers.llm.egress import base_url_refusal

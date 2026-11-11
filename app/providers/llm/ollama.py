@@ -76,7 +76,7 @@ class OllamaProvider(LLMProvider):
 
         async with self._http_client(self.config.timeout_seconds) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
-            raise_for_status(response, self.label)
+            raise_for_status(response, self.label, details=self.config.show_error_details)
             data = response.json()
 
         content = (data.get("message") or {}).get("content")
@@ -88,7 +88,7 @@ class OllamaProvider(LLMProvider):
         try:
             async with self._http_client(10.0) as client:
                 response = await client.get(f"{self.base_url}/api/tags")
-                raise_for_status(response, self.label)
+                raise_for_status(response, self.label, details=self.config.show_error_details)
                 data = response.json()
         except LLMError as exc:
             return ProviderStatus(ok=False, detail=str(exc))

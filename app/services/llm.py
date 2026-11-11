@@ -139,6 +139,8 @@ def _build_workspace_config(raw: Dict[str, Any]) -> LLMConfig:
         # the server: whether their base URL may reach the server's private
         # network is the operator's call.
         allow_private_network=settings.ALLOW_PRIVATE_LLM_BASE_URL,
+        # Nor is what that base URL answers theirs to read back.
+        show_error_details=False,
     )
 
 

@@ -70,6 +70,12 @@ class LLMConfig:
     #: workspace settings follow ALLOW_PRIVATE_LLM_BASE_URL. Link-local and
     #: cloud metadata addresses are refused either way (see egress.py).
     allow_private_network: bool = True
+    #: Whether an error reply's own message (its JSON "error" / "message")
+    #: is shown. True for the install's own provider: hiding it turned
+    #: Ollama's "model requires more system memory" into "try again later".
+    #: False for workspace settings, whose base URL anyone who signs up can
+    #: point at an internal service.
+    show_error_details: bool = True
 
 
 @dataclass(slots=True)
@@ -222,9 +228,10 @@ class LLMProvider(ABC):
 
 
 #: What to tell a person when a provider answers with an error status. The
-#: response body is not repeated: the base URL can point anywhere, and its
-#: error page is not ours to hand back (a 403 from an internal service is
-#: still that service's content).
+#: response body itself is not repeated: the base URL can point anywhere,
+#: and its error page is not ours to hand back (a 403 from an internal
+#: service is still that service's content). For the install's own
+#: provider the reply's own error message is added (see _provider_message).
 _STATUS_HINTS = {
     400: "rejected the request. Check the model name and the settings.",
     401: "rejected the API key. Check the key.",
@@ -237,18 +244,56 @@ _STATUS_HINTS = {
 }
 
 
-def raise_for_status(response: httpx.Response, label: str) -> None:
-    """Raise LLMError for an error status, with a sentence that says what to check."""
+#: Longest provider error message passed on; the rest is dropped.
+_PROVIDER_MESSAGE_CHARS = 300
+
+
+def _provider_message(response: httpx.Response) -> Optional[str]:
+    """
+    The error message an LLM API puts in its JSON reply - Ollama's and
+    OpenAI's {"error": ...}, Anthropic's {"error": {"message": ...}},
+    {"message": ...}, {"detail": ...} - or None. Anything that is not such a
+    JSON message (an HTML page from a proxy or an internal service) is never
+    passed on.
+    """
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    message = data.get("error")
+    if isinstance(message, dict):
+        message = message.get("message")
+    if not isinstance(message, str):
+        message = next((data[k] for k in ("message", "detail") if isinstance(data.get(k), str)), None)
+    if not message:
+        return None
+    text = " ".join(message.split())
+    if len(text) > _PROVIDER_MESSAGE_CHARS:
+        text = f"{text[:_PROVIDER_MESSAGE_CHARS]}…"
+    return text or None
+
+
+def raise_for_status(response: httpx.Response, label: str, *, details: bool = False) -> None:
+    """
+    Raise LLMError for an error status, with a sentence that says what to
+    check. With details, the provider's own error message is used when it
+    sent one (the install's own provider; see LLMConfig.show_error_details).
+    """
     if response.is_success:
         return
     status = response.status_code
+    logger.debug("%s answered %s: %s", label, status, response.text[:500])
+    message = _provider_message(response) if details else None
+    if message:
+        raise LLMError(f"{label} request failed ({status}): {message}", status_code=status)
     if status in _STATUS_HINTS:
         hint = _STATUS_HINTS[status]
     elif status >= 500:
         hint = "had a server error. Try again later."
     else:
         hint = "answered with an error."
-    logger.debug("%s answered %s: %s", label, status, response.text[:500])
     raise LLMError(f"{label} request failed ({status}): {label} {hint}", status_code=status)
 
 

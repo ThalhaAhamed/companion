@@ -66,7 +66,8 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: Optional[int] = None
     # Whether a workspace owner's AI base URL (Members page) may point at a
-    # private or loopback address (10/8, 172.16/12, 192.168/16, 127/8, ...).
+    # private or loopback address (10/8, 172.16/12, 192.168/16, 127/8,
+    # 100.64/10 carrier-grade NAT, ...: anything not on the public internet).
     # On by default: teams run internal LLM gateways. Turn off on a server
     # where people you do not trust can sign up, so their base URL cannot
     # reach your internal network. Link-local and cloud metadata addresses

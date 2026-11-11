@@ -56,7 +56,7 @@ class GeminiProvider(LLMProvider):
         url = f"{self.base_url}/v1beta/models/{self.config.model}:generateContent"
         async with self._http_client(self.config.timeout_seconds) as client:
             response = await client.post(url, headers=self._headers(), json=payload)
-            raise_for_status(response, self.label)
+            raise_for_status(response, self.label, details=self.config.show_error_details)
             data = response.json()
 
         candidates = data.get("candidates") or []
@@ -74,7 +74,7 @@ class GeminiProvider(LLMProvider):
                 response = await client.get(
                     f"{self.base_url}/v1beta/models", headers=self._headers()
                 )
-                raise_for_status(response, self.label)
+                raise_for_status(response, self.label, details=self.config.show_error_details)
                 data = response.json()
         except LLMError as exc:
             return ProviderStatus(ok=False, detail=str(exc))

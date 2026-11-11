@@ -11,7 +11,8 @@ Two rules:
 
 * Link-local and cloud metadata addresses are never reachable, whoever
   configured the URL. No LLM lives there.
-* Private and loopback addresses (10/8, 172.16/12, 192.168/16, 127/8, ...)
+* Private and loopback addresses (10/8, 172.16/12, 192.168/16, 127/8,
+  100.64/10 carrier-grade NAT: anything not on the public internet)
   are allowed unless the config says otherwise. Teams run internal LLM
   gateways, and Ollama is on localhost, so blocking them is an operator's
   choice: ALLOW_PRIVATE_LLM_BASE_URL=false applies it to workspace settings.
@@ -75,9 +76,21 @@ def _as_ip(value: str) -> Optional[_IP]:
         ip = ipaddress.ip_address(value.strip("[]").split("%", 1)[0])
     except ValueError:
         return None
-    # ::ffff:169.254.169.254 is the IPv4 address in disguise.
-    mapped = getattr(ip, "ipv4_mapped", None)
-    return mapped or ip
+    # IPv4 addresses in IPv6 disguise are judged as the IPv4 address:
+    # ::ffff:169.254.169.254 (mapped), 2002:a9fe:a9fe:: (6to4) and
+    # 64:ff9b::a9fe:a9fe (NAT64, which a DNS64 resolver hands out and the
+    # NAT64 gateway turns back into 169.254.169.254).
+    if ip.version == 6:
+        if ip.ipv4_mapped:
+            return ip.ipv4_mapped
+        if ip.sixtofour:
+            return ip.sixtofour
+        if ip in _NAT64:
+            return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return ip
+
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 
 def _always_blocked(ip: _IP) -> bool:
@@ -85,7 +98,10 @@ def _always_blocked(ip: _IP) -> bool:
 
 
 def _private(ip: _IP) -> bool:
-    return ip.is_private or ip.is_loopback or ip.is_unspecified or ip.is_link_local
+    # Anything not on the public internet. is_private alone missed
+    # 100.64.0.0/10 (carrier-grade NAT, also where Tailscale addresses live),
+    # so a tailnet service stayed reachable with private addresses off.
+    return not ip.is_global or ip.is_private or ip.is_loopback or ip.is_unspecified or ip.is_link_local
 
 
 def refusal_for_address(host: str, ip: _IP, *, allow_private: bool) -> Optional[str]:

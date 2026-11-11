@@ -66,7 +66,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     headers=self._headers(),
                     json=payload,
                 )
-            raise_for_status(response, self.label)
+            raise_for_status(response, self.label, details=self.config.show_error_details)
             data = response.json()
 
         try:
@@ -78,7 +78,7 @@ class OpenAICompatibleProvider(LLMProvider):
         try:
             async with self._http_client(15.0) as client:
                 response = await client.get(f"{self.base_url}/models", headers=self._headers())
-                raise_for_status(response, self.label)
+                raise_for_status(response, self.label, details=self.config.show_error_details)
                 data = response.json()
         except LLMError as exc:
             return ProviderStatus(ok=False, detail=str(exc))
