@@ -50,6 +50,13 @@ SETUP_TOKEN=auto APP_BIND=0.0.0.0 docker compose up -d
 docker compose logs app | grep setup_token     # open that link once, in your browser
 ```
 
+**Upgrading an existing install.** Before this change, Compose published the
+port on every interface. If you open the app as `http://<server-ip>:8000`, or
+MeetStream reaches it on that port, set `APP_BIND=0.0.0.0` in a `.env` file
+next to `docker-compose.yml` before you update, so it stays reachable. A
+reverse proxy on the same host (it connects to `127.0.0.1:8000`) and a proxy
+container on the compose network need no change.
+
 Another way: keep the default, open an SSH tunnel
 (`ssh -L 8000:localhost:8000 you@server`), finish setup at
 <http://localhost:8000>, then restart with `APP_BIND=0.0.0.0`. Docker's port

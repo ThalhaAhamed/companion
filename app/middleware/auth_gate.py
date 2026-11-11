@@ -134,7 +134,11 @@ def _accept_setup_link(request: Request) -> RedirectResponse:
 
     presented = request.query_params.get(SETUP_TOKEN_PARAM) or ""
     remaining = [(k, v) for k, v in request.query_params.multi_items() if k != SETUP_TOKEN_PARAM]
-    target = request.url.path + (f"?{urlencode(remaining)}" if remaining else "")
+    # Always a path on this server. Redirecting to the path as sent made
+    # //evil.example/?setup_token=x answer "Location: //evil.example/", which
+    # a browser follows to another site (so do /// and /\ to some browsers).
+    path = "/" + request.url.path.lstrip("/\\")
+    target = path + (f"?{urlencode(remaining)}" if remaining else "")
     response = RedirectResponse(target, status_code=303)
     expected = setup_token()
     if expected is not None and hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):

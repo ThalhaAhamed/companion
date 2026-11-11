@@ -128,6 +128,8 @@ docker compose --profile postgres up -d   # plus a pgvector Postgres the app is 
 - **First visit** walks through onboarding; configuration, database and embedding model live in the `data` volume.
 - **Skip onboarding** by setting `LLM_PROVIDER`, `LLM_API_KEY`, `DATABASE_URL` in `docker-compose.yml`.
 - **Production mode** in the image (`/docs` off); the image is built and booted in CI on every push.
+- **Reachable on this machine only** by default: the port is published on `127.0.0.1`. To open it to other machines, finish setup first (or set `SETUP_TOKEN=auto`), then start with `APP_BIND=0.0.0.0` ([details](docs/configuration.md#docker)).
+- **Upgrading an install you open as `http://<server-ip>:8000`?** Compose now publishes on `127.0.0.1` only, so after the update that address stops answering. Set `APP_BIND=0.0.0.0` (in `.env` next to `docker-compose.yml`, or `APP_BIND=0.0.0.0 docker compose up -d`) to keep it reachable, or put a reverse proxy with HTTPS in front.
 
 > [!IMPORTANT]
 > To send bots into calls, MeetStream must reach your server - a public host or a tunnel ([docs/live-meetings.md](docs/live-meetings.md)). Upload and Ask AI work without it.
@@ -186,6 +188,7 @@ Run them from the activated virtual environment (`source .venv/bin/activate`, or
 | *Processed without AI (…)* | Provider failed; the bracket says why | Fix it in Settings (e.g. `ollama pull <model>`), then **Reprocess** |
 | Database *Not reachable* | Host, credentials or SSL | The banner carries the driver's message; Neon/Supabase strings paste as-is |
 | Blank page after upgrading from v0.2 | Accounts predating workspaces | Fixed in v0.3.1 - upgrade |
+| `http://<server-ip>:8000` stopped answering after an update | Compose publishes on `127.0.0.1` by default | `APP_BIND=0.0.0.0` in `.env` next to `docker-compose.yml`, or a reverse proxy in front |
 
 More: [docs/troubleshooting.md](docs/troubleshooting.md).
 

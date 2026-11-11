@@ -1,5 +1,12 @@
 # Troubleshooting
 
+**`http://<server-ip>:8000` stopped answering after an update (Docker).**
+Docker Compose now publishes the port on `127.0.0.1` only, so the app is
+reachable from the server itself but not from other machines. Set
+`APP_BIND=0.0.0.0` in a `.env` file next to `docker-compose.yml` and run
+`docker compose up -d` again, or put a reverse proxy with HTTPS in front
+(see [Configuration](configuration.md#docker)).
+
 **A meeting sits at "Joining" or "Left the call" for a long time.** The
 server asks MeetStream about the bot every 20 seconds, so the status should
 follow the call within half a minute and extraction should start on its own

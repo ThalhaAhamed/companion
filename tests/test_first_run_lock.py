@@ -85,3 +85,26 @@ async def test_without_setup_token_first_run_is_unchanged(monkeypatch):
     async with _client() as first:
         assert (await first.get("/api/setup/providers")).status_code == 200
         assert (await first.post("/api/members", json=FIRST_ACCOUNT)).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setup_token", [None, "auto"])
+@pytest.mark.parametrize("path", ["//evil.example/", "///evil.example/", "/\evil.example/"])
+async def test_the_setup_link_redirect_stays_on_this_server(monkeypatch, setup_token, path):
+    """
+    The setup link is redirected to drop the token from the address bar. It
+    redirected to the path as sent, so //evil.example/?setup_token=x
+    answered "Location: //evil.example/" and the browser left the site - on
+    any server, with or without SETUP_TOKEN.
+    """
+    if setup_token:
+        monkeypatch.setenv("SETUP_TOKEN", setup_token)
+    else:
+        monkeypatch.delenv("SETUP_TOKEN", raising=False)
+    async with _client() as visitor:
+        # An absolute URL, so the client sends the path as written instead of
+        # reading //evil.example as a host.
+        r = await visitor.get(f"http://test{path}?setup_token=x&next=onboarding", follow_redirects=False)
+        assert r.request.url.host == "test"
+        assert r.status_code == 303
+        assert r.headers["location"] == "/evil.example/?next=onboarding"
