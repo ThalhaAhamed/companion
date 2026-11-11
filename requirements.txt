@@ -20,12 +20,11 @@ pgvector==0.3.6
 # ---- Embeddings & RAG ----
 # ONNX build of all-MiniLM-L6-v2: identical vectors to the PyTorch model,
 # without the multi-gigabyte torch dependency (see app/services/embedding.py).
-fastembed==0.8.0
+fastembed==0.9.1
 # fastembed pulls pillow; pinned explicitly so security bumps are visible here.
-# Held at 12.x: fastembed (0.8 and 0.9) requires pillow<13. The app only embeds
-# text and never decodes images, so the 12.x image-decoding advisories ignored
-# in ci.yml are not reachable. Move to 13.x as soon as fastembed allows it.
-pillow==12.3.0
+# fastembed 0.9.1 allows pillow 13, which fixes the 12.x advisories that
+# ci.yml used to ignore.
+pillow==13.0.0
 langchain-text-splitters==1.1.2
 numpy>=1.26.0
 
@@ -36,7 +35,7 @@ numpy>=1.26.0
 # adding a provider a code change rather than a dependency change.
 
 # ---- Documents ----
-pypdf==6.21.2
+pypdf==6.21.4
 
 # ---- HTTP Client ----
 httpx==0.28.1

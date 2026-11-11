@@ -43,13 +43,9 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Audit dependencies for known vulnerabilities
         if: matrix.database == 'sqlite'
-        # The ignored IDs are Pillow 12.x image-decoding advisories, fixed only in
-        # Pillow 13. fastembed still requires pillow<13, and the app never decodes
-        # images (text embeddings only), so they are not reachable. Remove the
-        # ignores when fastembed allows Pillow 13 (see requirements.txt).
         run: |
           pip install pip-audit
-          pip-audit -r requirements.txt --progress-spinner off --ignore-vuln GHSA-p4wg-p73j-c528 --ignore-vuln GHSA-65qm-jvmh-6pqg --ignore-vuln GHSA-58r4-6rv3-gfh8 --ignore-vuln GHSA-pchr-8j38-3x4p --ignore-vuln GHSA-q45j-58j2-45rg --ignore-vuln GHSA-462x-pgg6-55fp --ignore-vuln GHSA-c6hw-5grf-ff96 --ignore-vuln GHSA-vx6w-vv9f-6gvg
+          pip-audit -r requirements.txt --progress-spinner off
       - name: Run tests
         env:
           TEST_DATABASE_URL: ${{ matrix.database == 'postgres' && 'postgresql+asyncpg://meet:meet@localhost:5432/meet_companion_test' || '' }}
